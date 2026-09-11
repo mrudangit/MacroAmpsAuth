@@ -37,7 +37,9 @@ class LogonServiceTest {
         return new AmpsProperties(
                 new AmpsProperties.Auth(AmpsProperties.Backend.INMEMORY, usernamePathMustMatch,
                         new AmpsProperties.InMemory(false, List.of()),
-                        new AmpsProperties.Ldap(null, null, Duration.ofSeconds(1), Duration.ofSeconds(2), true)),
+                        new AmpsProperties.Ldap(null, null, Duration.ofSeconds(1), Duration.ofSeconds(2), true),
+                        new AmpsProperties.UserInfo(null, "preferred_username", "groups", List.of(), true,
+                                Duration.ofSeconds(1), Duration.ofSeconds(2), true)),
                 new AmpsProperties.Permissions("classpath:amps/permissions-logon-only.json"));
     }
 

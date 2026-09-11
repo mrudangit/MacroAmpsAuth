@@ -16,7 +16,8 @@ import org.springframework.security.crypto.factory.PasswordEncoderFactories;
  * The single integration point of the AMPS authentication feature. Everything the feature needs is
  * registered from here: the {@code amps.*} properties, the components of this package (controller,
  * logon service, parser, filter), the permissions document and exactly one
- * {@link CredentialValidator} selected by {@code amps.auth.backend} ({@code inmemory} | {@code ldap}).
+ * {@link CredentialValidator} selected by {@code amps.auth.backend}
+ * ({@code inmemory} | {@code ldap} | {@code userinfo}).
  * <p>
  * When this package sits below the host application's root package it is picked up by the normal
  * component scan; otherwise add {@code @Import(AmpsAuthConfiguration.class)} to a configuration
@@ -33,6 +34,7 @@ public class AmpsAuthConfiguration {
 
     static final String BACKEND_PROPERTY = "amps.auth.backend";
     static final String LDAP_HEALTH_PROPERTY = "amps.auth.ldap.health-indicator-enabled";
+    static final String USERINFO_HEALTH_PROPERTY = "amps.auth.userinfo.health-indicator-enabled";
 
     /** Loads the permissions document from {@code amps.permissions.template} once, at startup. */
     @Bean
@@ -71,11 +73,31 @@ public class AmpsAuthConfiguration {
         return new LdapHealthIndicator(ldapProbe, properties.auth().ldap().url());
     }
 
-    /** Declared last on purpose: only reached when neither backend condition above matched. */
+    @Bean
+    @ConditionalOnProperty(name = BACKEND_PROPERTY, havingValue = "userinfo")
+    JdkUserInfoClient jdkUserInfoClient(AmpsProperties properties) {
+        return new JdkUserInfoClient(properties.auth().userinfo());
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = BACKEND_PROPERTY, havingValue = "userinfo")
+    UserInfoCredentialValidator userInfoCredentialValidator(AmpsProperties properties, UserInfoClient userInfoClient) {
+        return new UserInfoCredentialValidator(properties.auth().userinfo(), userInfoClient);
+    }
+
+    /** Optional UserInfo reachability indicator; like the LDAP one it never joins the readiness group. */
+    @Bean
+    @ConditionalOnProperty(name = BACKEND_PROPERTY, havingValue = "userinfo")
+    @ConditionalOnBooleanProperty(name = USERINFO_HEALTH_PROPERTY, matchIfMissing = true)
+    UserInfoHealthIndicator userInfoHealthIndicator(AmpsProperties properties, UserInfoProbe userInfoProbe) {
+        return new UserInfoHealthIndicator(userInfoProbe, properties.auth().userinfo().url());
+    }
+
+    /** Declared last on purpose: only reached when no backend condition above matched. */
     @Bean
     @ConditionalOnMissingBean(CredentialValidator.class)
     CredentialValidator unsupportedCredentialBackend(Environment environment) {
         throw new IllegalStateException("Unsupported " + BACKEND_PROPERTY + " value '"
-                + environment.getProperty(BACKEND_PROPERTY) + "'; expected one of: inmemory, ldap");
+                + environment.getProperty(BACKEND_PROPERTY) + "'; expected one of: inmemory, ldap, userinfo");
     }
 }

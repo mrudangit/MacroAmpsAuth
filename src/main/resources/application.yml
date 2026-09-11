@@ -15,7 +15,7 @@ server:
 
 amps:
   auth:
-    backend: inmemory                    # inmemory | ldap
+    backend: inmemory                    # inmemory | ldap | userinfo
     username-path-must-match: true
     inmemory:
       allow-plaintext: false
@@ -23,6 +23,16 @@ amps:
     ldap:
       url: ldaps://ldap.example.com:636
       user-principal-pattern: "{0}@corp.example.com"
+      connect-timeout: 1000ms
+      read-timeout: 2000ms
+    # userinfo: the AMPS password is an OAuth2/OIDC access token (e.g. from a PKCE flow); the service
+    # calls the UserInfo endpoint with it and requires a principal match plus an enabled group.
+    userinfo:
+      url: https://login.example.com/oauth2/userinfo
+      principal-claim: preferred_username   # must equal the AMPS username (case-insensitive)
+      groups-claim: groups                  # exact claim name, or a dotted path such as realm_access.roles
+      enabled-groups: []                    # e.g. [amps-users, amps-admins]; at least one is required
+      principal-must-match: true
       connect-timeout: 1000ms
       read-timeout: 2000ms
   permissions:

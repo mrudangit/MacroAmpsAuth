@@ -5,9 +5,10 @@ A small, stateless Spring Boot service that answers logon requests from the AMPS
 
 When an AMPS client logs on, AMPS calls this service over HTTP(S) with the client's credentials in an
 `Authorization: Basic` header. The service validates them against a pluggable credential backend
-(in-memory users for dev/test and break-glass, an LDAP/Active Directory bind for production) and
-answers `200` with a JSON *permissions document* (`"logon": true`), `403` when the logon must be
-refused, or `503` when the credential backend itself is unavailable.
+(in-memory users for dev/test and break-glass, an LDAP/Active Directory bind, or an OAuth2/OIDC
+UserInfo endpoint when the "password" is an access token from a PKCE flow) and answers `200` with a
+JSON *permissions document* (`"logon": true`), `403` when the logon must be refused, or `503` when
+the credential backend itself is unavailable.
 
 Reference for the AMPS side of the contract:
 <https://crankuptheamps.com/docs/amps-user-guide/securing/http-auth-module>
@@ -36,6 +37,7 @@ Reference for the AMPS side of the contract:
   - [5.2 Hashing a password](#52-hashing-a-password)
   - [5.3 `ldap`](#53-ldap)
   - [5.4 LDAP over TLS and the JVM truststore](#54-ldap-over-tls-and-the-jvm-truststore)
+  - [5.5 `userinfo` (OAuth2/OIDC access token)](#55-userinfo-oauth2oidc-access-token)
 - [6. TLS for this service (and optional mTLS)](#6-tls-for-this-service-and-optional-mtls)
 - [7. Logging, metrics and health](#7-logging-metrics-and-health)
   - [7.1 Logging](#71-logging)
@@ -159,7 +161,7 @@ body (`server.error.include-*` are all off); an unsupported method gets the same
 
 | Header | AMPS `HTTPHeader` token | Required | Handling |
 |---|---|---|---|
-| `Authorization: Basic <base64(username:password)>` | AMPS logon credentials | yes | Standard (not URL-safe) base64, decoded as strict UTF-8, split at the **first** `:` — passwords may contain colons. Nothing is trimmed: leading/trailing spaces inside the username or password are preserved. The scheme name is compared case-insensitively (`basic` is accepted). |
+| `Authorization: Basic <base64(username:password)>` | AMPS logon credentials | yes | Standard (not URL-safe) base64, decoded as strict UTF-8, split at the **first** `:` — passwords may contain colons. Nothing is trimmed: leading/trailing spaces inside the username or password are preserved. The scheme name is compared case-insensitively (`basic` is accepted). With the `userinfo` backend the "password" is an OAuth2 access token ([5.5](#55-userinfo-oauth2oidc-access-token)); Tomcat's default 8 KB header limit fits tokens up to roughly 5 KB, raise `server.max-http-request-header-size` for larger ones. |
 | `X-AMPS-Client-Name` | `{{AMPS_CLIENT_NAME}}` | no | Logged only. |
 | `X-AMPS-Remote-Address` | `{{AMPS_REMOTE_ADDRESS}}` | no | Logged only. |
 | `X-AMPS-Connection-Name` | `{{AMPS_CONNECTION_NAME}}` | no | Logged only. |
@@ -259,7 +261,7 @@ command line (`--amps.auth.backend=ldap`).
 
 | Property | Type | Default | Meaning |
 |---|---|---|---|
-| `amps.auth.backend` | enum: `inmemory` \| `ldap` | `inmemory` | Selects the single active credential backend. Matched **case-insensitively** (`LDAP`, `Ldap`, `ldap` all work). **Any other value fails startup**: a typo such as `kerberos` is rejected while binding the property (`Failed to bind properties under 'amps.auth.backend'`), and a spelling that binds but selects nothing (for example `in-memory`) is rejected with `Unsupported amps.auth.backend value '<x>'; expected one of: inmemory, ldap`. |
+| `amps.auth.backend` | enum: `inmemory` \| `ldap` \| `userinfo` | `inmemory` | Selects the single active credential backend. Matched **case-insensitively** (`LDAP`, `Ldap`, `ldap` all work). **Any other value fails startup**: a typo such as `kerberos` is rejected while binding the property (`Failed to bind properties under 'amps.auth.backend'`), and a spelling that binds but selects nothing (for example `in-memory`) is rejected with `Unsupported amps.auth.backend value '<x>'; expected one of: inmemory, ldap, userinfo`. |
 | `amps.auth.username-path-must-match` | boolean | `true` | When `true`, a `{username}` path variable that differs (case-insensitively) from the Basic-auth username produces `403` / `outcome=USERNAME_MISMATCH`. When `false`, the path variable is ignored entirely. Has no effect on the no-path-variable endpoint. |
 | `amps.auth.inmemory.allow-plaintext` | boolean | `false` | When `false`, any `{noop}` password in the user list **fails startup**. Intended to be turned on in the `local` profile only. |
 | `amps.auth.inmemory.users` | list | empty | The in-memory user list. Its entries are bound and bean-validated for every backend; the encoder/plaintext/duplicate checks below run only when `backend=inmemory`. **Define the whole list in one place** (one profile file or one property source): Spring binds an indexed list from the highest-priority source that contains it and never merges entries across sources, so adding `users[2]` on the command line replaces the list from the file (and, with a gap in the indexes, fails startup). |
@@ -270,12 +272,21 @@ command line (`--amps.auth.backend=ldap`).
 | `amps.auth.ldap.connect-timeout` | duration | `1000ms` | Maps to the JNDI property `com.sun.jndi.ldap.connect.timeout`. Must be positive. `connect-timeout + read-timeout` is the service's worst-case LDAP time per logon; keep that sum at or below the AMPS `RequestTimeout` (see [8](#8-amps-configuration)). |
 | `amps.auth.ldap.read-timeout` | duration | `2000ms` | Maps to the JNDI property `com.sun.jndi.ldap.read.timeout`. Must be positive. |
 | `amps.auth.ldap.health-indicator-enabled` | boolean | `true` | When the `ldap` backend is active, registers an `ldap` health component that does an **anonymous connect** to the server. It contributes to `/actuator/health` **only** — never to the readiness or liveness groups. A server that is reachable but refuses anonymous binds still counts as `UP`. Set to `false` if a load balancer probes `/actuator/health` (instead of `/actuator/health/readiness`), so that an LDAP outage cannot pull the service out of rotation. |
+| `amps.auth.userinfo.url` | string | `https://login.example.com/oauth2/userinfo` (from `application.yml`) | The OIDC UserInfo endpoint called with `Authorization: Bearer <access token>`. **Required** when `backend=userinfo`; must be an absolute `http(s)://` URL; a plain `http://` URL logs a **WARN** at startup (tokens in clear text). Redirects are never followed. |
+| `amps.auth.userinfo.principal-claim` | string | `preferred_username` | Claim whose value must equal the AMPS username (case-insensitive). Exact claim name first, then a dotted path into nested objects. Common alternatives: `upn`, `email`, `sub`. |
+| `amps.auth.userinfo.groups-claim` | string | `groups` | Claim listing the user's groups: a JSON array of strings, or one string of space/comma-separated names. Exact name first (so namespaced names such as `https://example.com/groups` work), then a dotted path such as `realm_access.roles`. |
+| `amps.auth.userinfo.enabled-groups` | list of strings | empty | Groups that grant logon; the user must be in **at least one** (compared case-insensitively, trimmed). **Must not be empty** when `backend=userinfo` — startup fails otherwise. |
+| `amps.auth.userinfo.principal-must-match` | boolean | `true` | When `true`, a token whose principal claim differs from the AMPS username is refused (`403`, WARN in the log). Leave it on: otherwise any valid token of any user in an enabled group could log on under any name. |
+| `amps.auth.userinfo.connect-timeout` | duration | `1000ms` | TCP/TLS connect timeout of the UserInfo call. Must be positive. |
+| `amps.auth.userinfo.read-timeout` | duration | `2000ms` | Response timeout of the UserInfo call. Must be positive; `connect-timeout + read-timeout` is the worst case per logon (see [8](#8-amps-configuration)). |
+| `amps.auth.userinfo.health-indicator-enabled` | boolean | `true` | When the `userinfo` backend is active, registers a `userInfo` health component that sends an **unauthenticated** GET to the endpoint; any HTTP answer (typically `401`) counts as `UP`, only a connection failure or timeout is `DOWN`. Contributes to `/actuator/health` only, never to readiness or liveness. |
 | `amps.permissions.template` | string (Spring resource location) | `classpath:amps/permissions-logon-only.json` | Where the success document comes from. May be `file:/path/to/doc.json`. Loaded once at startup; startup fails if it is missing or is not a JSON object. |
 
 The whole `amps.*` tree is bound and bean-validated at startup whatever the backend (for example a
 blank `users[].username` or `users[].password` fails validation even with `backend=ldap`). The
 backend-specific checks run only for the selected backend: the LDAP URL/pattern/timeout checks when
-`amps.auth.backend=ldap`, the in-memory password rules below when `amps.auth.backend=inmemory`.
+`amps.auth.backend=ldap`, the UserInfo URL/claim/group checks when `amps.auth.backend=userinfo`, the
+in-memory password rules below when `amps.auth.backend=inmemory`.
 
 **Startup validation of `amps.auth.inmemory.users[].password`** — each of these aborts startup with a
 message naming the offending index (and the username, where it is known):
@@ -530,6 +541,72 @@ A missing or wrong CA shows up as `503` / `outcome=BACKEND_UNAVAILABLE` with an 
 cause chain mentions `SSLHandshakeException` / `PKIX path building failed`. Add
 `-Djavax.net.debug=ssl:handshake` temporarily to diagnose it.
 
+### 5.5 `userinfo` (OAuth2/OIDC access token)
+
+For clients that obtain an **access token** from the identity provider first (an Authorization Code +
+PKCE flow, typically) and then log on to AMPS with their username and **the token as the password**.
+The service never sees a real password; it checks the token by calling the provider's
+**UserInfo endpoint**:
+
+1. `GET amps.auth.userinfo.url` with `Authorization: Bearer <token>` and `Accept: application/json`,
+   using the configured connect/read timeouts, never following redirects.
+2. The response must be `200` with a JSON object. The **principal claim** must equal the AMPS
+   username (case-insensitive) — this is what binds the token to the name AMPS will use as the
+   identity.
+3. The **groups claim** must contain at least one of `amps.auth.userinfo.enabled-groups`
+   (case-insensitive).
+
+| UserInfo result | `ValidationResult` | HTTP | Logging |
+|---|---|---|---|
+| `200`, principal matches, an enabled group present | `VALID` | `200` | the normal INFO logon line |
+| `200` but no enabled group (or no groups claim) | `INVALID` | `403` | DEBUG (`user=... is not in an enabled group (claim=... groups=[...])`) |
+| `200` but the principal claim differs from the username | `INVALID` | `403` | **WARN** `userinfo principal does not match the logon username user=... principal=...` — a token presented under another user's name |
+| `401` or `403` (invalid, expired or revoked token) | `INVALID` | `403` | DEBUG |
+| Any other status (`404`, `429`, `5xx`, a redirect, ...) | `BACKEND_UNAVAILABLE` | `503` | **ERROR** `userinfo endpoint returned status=...` |
+| Body not a JSON object | `BACKEND_UNAVAILABLE` | `503` | **ERROR** |
+| Connection failure or timeout | `BACKEND_UNAVAILABLE` | `503` | **ERROR** with the exception |
+
+The token is never logged, never echoed, and can only ever be sent to the configured URL. An empty
+"password" is refused before any call ([3.3](#33-responses)); a token containing control characters
+is refused as well (it could never be valid and must not reach an HTTP header).
+
+```yaml
+amps:
+  auth:
+    backend: userinfo
+    userinfo:
+      url: https://login.corp.example.com/oauth2/v1/userinfo
+      principal-claim: preferred_username      # or upn / email / sub, whatever equals the AMPS username
+      groups-claim: groups                     # or a dotted path such as realm_access.roles
+      enabled-groups:
+        - amps-users
+        - amps-admins
+      principal-must-match: true
+      connect-timeout: 1000ms
+      read-timeout: 2000ms
+      health-indicator-enabled: true
+```
+
+Notes:
+
+- **Which claims your provider returns** depends on its configuration: groups usually have to be
+  added to the UserInfo response explicitly (a "groups" scope or claim mapping in Entra ID, Okta,
+  Keycloak, Ping and similar). Check with `curl -H "Authorization: Bearer <token>" <url>` once and
+  set `principal-claim` / `groups-claim` to what you see.
+- Group names are compared case-insensitively after trimming, so `AMPS-Users` and `amps-users`
+  are the same group.
+- The provider's certificate is validated against the **JVM truststore**, exactly as for `ldaps://`
+  ([5.4](#54-ldap-over-tls-and-the-jvm-truststore)).
+- Access tokens are long: a 4 KB token fits Tomcat's default 8 KB request-header limit; raise
+  `server.max-http-request-header-size` if your provider issues larger ones.
+- The service stays stateless: every logon is one UserInfo call, and AMPS caches the result per
+  user while the connection is open. A revoked token therefore only takes effect at the next logon,
+  like a password change.
+- **AMPS side:** nothing changes in the AMPS configuration ([8](#8-amps-configuration)); the client
+  application simply passes the access token where it would pass the password, e.g.
+  `tcp://jdoe:<access token>@amps-host:9007/amps/json` or `Client.logon()` with the token as the
+  password.
+
 ---
 
 ## 6. TLS for this service (and optional mTLS)
@@ -695,7 +772,7 @@ that this service does **no** lockout or rate limiting, see [12](#12-out-of-scop
 
 | Endpoint | Contents |
 |---|---|
-| `/actuator/health` | Overall status, including the optional `ldap` component when the `ldap` backend is active and `amps.auth.ldap.health-indicator-enabled=true`. |
+| `/actuator/health` | Overall status, including the optional `ldap` component (when the `ldap` backend is active and `amps.auth.ldap.health-indicator-enabled=true`) or the optional `userInfo` component (when the `userinfo` backend is active and `amps.auth.userinfo.health-indicator-enabled=true`). |
 | `/actuator/health/liveness` | Liveness probe — the JVM/context is alive. Never depends on LDAP. |
 | `/actuator/health/readiness` | Readiness probe — the application is ready to serve. **Never depends on LDAP.** |
 
@@ -711,10 +788,11 @@ expose the LDAP URL or an error class to a caller.
 
 The `ldap` health component performs an **anonymous connect** (no credentials). A server that is
 reachable but refuses anonymous binds still reports `UP` (with the note `anonymous bind refused`);
-only an unreachable or erroring server reports `DOWN`. **If your load balancer probes
-`/actuator/health` rather than `/actuator/health/readiness`, set
-`amps.auth.ldap.health-indicator-enabled: false`** — otherwise you reintroduce exactly the coupling
-the readiness group avoids.
+only an unreachable or erroring server reports `DOWN`. The `userInfo` component likewise sends an
+**unauthenticated** GET and treats any HTTP answer (normally `401`) as `UP`. **If your load balancer
+probes `/actuator/health` rather than `/actuator/health/readiness`, set the backend's
+`health-indicator-enabled` property to `false`** — otherwise you reintroduce exactly the coupling the
+readiness group avoids.
 
 ---
 
@@ -783,7 +861,9 @@ diagnosis surface.
 | Symptom | Meaning | What to do |
 |---|---|---|
 | `403` with `outcome=INVALID` | The backend rejected the credentials — a genuinely wrong username or password. | Verify the password. For LDAP, check the account is not locked/expired and that `user-principal-pattern` builds the right principal for this user: the DEBUG line `LDAP bind rejected principal=... reason=...` shows exactly what was tried and the server's diagnostic, with whitespace rendered as `_` (Active Directory: `data_52e` wrong password, `775` locked, `532` expired, `533` disabled, `773` must change). |
-| `503` with `outcome=BACKEND_UNAVAILABLE` | The credential backend is down, unreachable or timed out — **not** a bad password. | Find the accompanying **ERROR** line and its stack trace. For LDAP, check `amps.auth.ldap.url` (host, port, `ldaps` vs `ldap`), network/firewall reachability, `connect-timeout`/`read-timeout`, and the **truststore** ([5.4](#54-ldap-over-tls-and-the-jvm-truststore)) — a `PKIX path building failed` cause means the LDAP CA is not trusted. `/actuator/health` flips to `DOWN` when the `ldap` health component fails, but with `show-details: never` it shows no component detail — the URL and error class are in the service log (`WARN LDAP health check: server unreachable url=...`). |
+| `503` with `outcome=BACKEND_UNAVAILABLE` | The credential backend is down, unreachable or timed out — **not** a bad password. | Find the accompanying **ERROR** line and its stack trace. For LDAP, check `amps.auth.ldap.url` (host, port, `ldaps` vs `ldap`), network/firewall reachability, `connect-timeout`/`read-timeout`, and the **truststore** ([5.4](#54-ldap-over-tls-and-the-jvm-truststore)) — a `PKIX path building failed` cause means the LDAP CA is not trusted. For `userinfo`, `userinfo endpoint returned status=404` means a wrong `amps.auth.userinfo.url`, `status=429`/`5xx` a provider problem, and `unreachable or timed out` a network, TLS or timeout problem. `/actuator/health` flips to `DOWN` when the `ldap`/`userInfo` health component fails, but with `show-details: never` it shows no component detail — the URL and error class are in the service log (`WARN ... health check ...`). |
+| `403` with `outcome=INVALID` and a WARN `userinfo principal does not match the logon username user=<a> principal=<b>` | A valid access token of user `<b>` was presented with AMPS username `<a>`. | Usually a client passing the wrong username (for example `sAMAccountName` while the claim holds a UPN): change the client or `amps.auth.userinfo.principal-claim`. If `<a>` and `<b>` are different people, treat it as a security event. |
+| `403` with `outcome=INVALID` and a DEBUG `user=... is not in an enabled group` | The token is valid but the user is in none of `amps.auth.userinfo.enabled-groups`, or the groups claim is missing. | Check the group membership at the provider, that the provider actually puts groups into the UserInfo response, and that `amps.auth.userinfo.groups-claim` names that claim. |
 | Nothing at all appears in this service's log when a client logs on | The request never reached the service: an AMPS connectivity or TLS problem. | Check the **AMPS log** for the module's error lines. Verify the `ResourceURI` scheme, host, port and path (no `.json` suffix), that `CAKey` is the CA that signed this service's certificate, and that `ConnectionTimeout`/`RequestTimeout` are not shorter than the round trip. Reproduce the exact URL with `curl -v` from the AMPS host. |
 | `401` with `outcome=NO_CREDENTIALS` | AMPS (or a probe/health checker/load balancer) called the endpoint with **no** `Authorization` header. | Harmless on its own — the `WWW-Authenticate: Basic realm="amps"` challenge tells the AMPS HTTP client to retry with credentials, and a successful retry follows immediately. If it is *not* followed by a real attempt, something other than AMPS is probing the endpoint, or the AMPS module is not configured to send credentials. |
 | `403` with `outcome=USERNAME_MISMATCH` | The name AMPS substituted into `ResourceURI` differs from the Basic-auth logon username. | Check what `{{USER_NAME}}` expands to (domain prefixes, UPN vs `sAMAccountName`, URL-decoding of `\`). Either align the two, switch to the no-path-variable `ResourceURI`, or set `amps.auth.username-path-must-match: false`. |
@@ -796,7 +876,8 @@ always names the property:
 
 | Message | Cause | Fix |
 |---|---|---|
-| `Failed to bind properties under 'amps.auth.backend'` (unknown name such as `kerberos`) or `Unsupported amps.auth.backend value '<x>'; expected one of: inmemory, ldap` (a spelling such as `in-memory` that binds but selects nothing) | Typo in the backend name. | Use `inmemory` or `ldap` (any case). |
+| `Failed to bind properties under 'amps.auth.backend'` (unknown name such as `kerberos`) or `Unsupported amps.auth.backend value '<x>'; expected one of: inmemory, ldap, userinfo` (a spelling such as `in-memory` that binds but selects nothing) | Typo in the backend name. | Use `inmemory`, `ldap` or `userinfo` (any case). |
+| `amps.auth.userinfo.url must be set when amps.auth.backend=userinfo` / `must be an absolute http:// or https:// URL` / `enabled-groups must list at least one group` / `principal-claim must not be blank` / `groups-claim must not be blank` / `connect-timeout must be positive` | Incomplete UserInfo configuration. | Fill in the property ([4.1](#41-amps-properties), [5.5](#55-userinfo-oauth2oidc-access-token)). |
 | `...password for user '<u>' is plaintext ({noop}); hash it with --hash-password or set amps.auth.inmemory.allow-plaintext=true (local profile only)` | A `{noop}` password without the opt-in. | Hash it ([5.2](#52-hashing-a-password)), or set `allow-plaintext: true` in the `local` profile only. |
 | `...password for user '<u>' is not a valid bcrypt hash` / `must start with an encoder id such as {bcrypt}` / `uses an unsupported encoder id {...}` | A truncated, hand-edited or prefix-less password value. | Regenerate it with `--hash-password` and paste the whole `{bcrypt}...` string. |
 | `...: duplicate username '<u>' (usernames are compared case-insensitively)` | The same user twice (possibly differing only in case). | Remove the duplicate. |
@@ -860,6 +941,11 @@ src/main/java/com/example/ampsauth/ <- the feature package: copy this folder
   JndiDirContextFactory.java        default impl; also implements LdapProbe
   LdapProbe.java                    connectivity check for the health indicator
   LdapHealthIndicator.java          the optional "ldap" health component
+  UserInfoCredentialValidator.java  access token -> UserInfo endpoint -> principal + enabled-group check
+  UserInfoClient.java               HTTP seam for tests (fetch with a bearer token)
+  JdkUserInfoClient.java            default impl on the JDK HttpClient; also implements UserInfoProbe
+  UserInfoProbe.java                reachability check for the health indicator
+  UserInfoHealthIndicator.java      the optional "userInfo" health component
   LogonService.java                 guards -> validator -> outcome; metrics; the one INFO line
   LogonOutcome.java                 SUCCESS | NO_CREDENTIALS | MALFORMED | USERNAME_MISMATCH | INVALID | BACKEND_UNAVAILABLE
   RequestMetadata.java              the X-AMPS-* values, for logging only
@@ -927,5 +1013,6 @@ Not built in this iteration, but deliberately not precluded either:
   `"replication-logon": false`).
 - **Account lockout / rate limiting.** Repeated `outcome=INVALID` is visible in the metrics, but the
   service itself throttles nothing.
-- **Any database, session store, JWT or OAuth.** The service stays stateless.
+- **Any database, session store, local JWT validation or token issuance.** The service stays
+  stateless; the `userinfo` backend only *calls* the identity provider with the token it was given.
 - **Search-then-bind LDAP** with a service account — see [5.3](#53-ldap).

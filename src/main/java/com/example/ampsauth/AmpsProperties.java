@@ -23,13 +23,33 @@ public record AmpsProperties(@Valid @DefaultValue Auth auth, @Valid @DefaultValu
     public record Auth(@NotNull @DefaultValue("inmemory") Backend backend,
                        @DefaultValue("true") boolean usernamePathMustMatch,
                        @Valid @DefaultValue InMemory inmemory,
-                       @Valid @DefaultValue Ldap ldap) {
+                       @Valid @DefaultValue Ldap ldap,
+                       @Valid @DefaultValue UserInfo userinfo) {
     }
 
-    /** Credential backends. The property value is matched case-insensitively ({@code inmemory | ldap}). */
+    /**
+     * Credential backends. The property value is matched case-insensitively
+     * ({@code inmemory | ldap | userinfo}).
+     */
     public enum Backend {
         INMEMORY,
-        LDAP
+        LDAP,
+        USERINFO
+    }
+
+    /**
+     * {@code amps.auth.userinfo.*}: the AMPS "password" is an OAuth2/OIDC access token, checked by
+     * calling the UserInfo endpoint with it. Only validated when the {@code userinfo} backend is
+     * selected.
+     */
+    public record UserInfo(String url,
+                           @DefaultValue("preferred_username") String principalClaim,
+                           @DefaultValue("groups") String groupsClaim,
+                           @DefaultValue List<String> enabledGroups,
+                           @DefaultValue("true") boolean principalMustMatch,
+                           @DefaultValue("1000ms") Duration connectTimeout,
+                           @DefaultValue("2000ms") Duration readTimeout,
+                           @DefaultValue("true") boolean healthIndicatorEnabled) {
     }
 
     /** {@code amps.auth.inmemory.*} */

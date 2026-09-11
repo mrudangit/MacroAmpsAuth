@@ -107,6 +107,58 @@ class AmpsAuthConfigurationTest {
     }
 
     @Test
+    void userInfoBackendWiresClientValidatorAndHealthIndicator() {
+        runner.withPropertyValues(
+                "amps.auth.backend=userinfo",
+                "amps.auth.userinfo.url=https://login.example.com/oauth2/userinfo",
+                "amps.auth.userinfo.enabled-groups=amps-users,amps-admins",
+                "amps.auth.userinfo.groups-claim=realm_access.roles")
+                .run(context -> {
+                    assertThat(context).hasSingleBean(CredentialValidator.class);
+                    assertThat(context).hasSingleBean(UserInfoCredentialValidator.class);
+                    assertThat(context).hasSingleBean(JdkUserInfoClient.class);
+                    assertThat(context).hasSingleBean(UserInfoHealthIndicator.class);
+                    assertThat(context).doesNotHaveBean(InMemoryCredentialValidator.class);
+                    assertThat(context).doesNotHaveBean(LdapCredentialValidator.class);
+                    AmpsProperties.UserInfo userinfo = context.getBean(AmpsProperties.class).auth().userinfo();
+                    assertThat(userinfo.enabledGroups()).containsExactly("amps-users", "amps-admins");
+                    assertThat(userinfo.principalClaim()).isEqualTo("preferred_username");
+                    assertThat(userinfo.groupsClaim()).isEqualTo("realm_access.roles");
+                    assertThat(userinfo.principalMustMatch()).isTrue();
+                    assertThat(userinfo.connectTimeout()).isEqualTo(Duration.ofMillis(1000));
+                    assertThat(userinfo.readTimeout()).isEqualTo(Duration.ofMillis(2000));
+                });
+    }
+
+    @Test
+    void userInfoHealthIndicatorCanBeDisabled() {
+        runner.withPropertyValues(
+                "amps.auth.backend=userinfo",
+                "amps.auth.userinfo.url=https://login.example.com/oauth2/userinfo",
+                "amps.auth.userinfo.enabled-groups=amps-users",
+                "amps.auth.userinfo.health-indicator-enabled=false")
+                .run(context -> {
+                    assertThat(context).hasSingleBean(UserInfoCredentialValidator.class);
+                    assertThat(context).doesNotHaveBean(UserInfoHealthIndicator.class);
+                });
+    }
+
+    @Test
+    void userInfoBackendWithoutUrlOrGroupsFailsStartup() {
+        runner.withPropertyValues("amps.auth.backend=userinfo", "amps.auth.userinfo.enabled-groups=amps-users")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(failureMessages(context.getStartupFailure())).contains("amps.auth.userinfo.url");
+                });
+        runner.withPropertyValues("amps.auth.backend=userinfo",
+                "amps.auth.userinfo.url=https://login.example.com/oauth2/userinfo")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(failureMessages(context.getStartupFailure())).contains("enabled-groups");
+                });
+    }
+
+    @Test
     void ldapBackendWithoutUrlFailsStartup() {
         runner.withPropertyValues("amps.auth.backend=ldap", "amps.auth.ldap.url=",
                 "amps.auth.ldap.user-principal-pattern={0}@corp.example.com")
@@ -131,7 +183,7 @@ class AmpsAuthConfigurationTest {
             assertThat(context).hasFailed();
             assertThat(failureMessages(context.getStartupFailure()))
                     .contains("Unsupported amps.auth.backend value 'in-memory'")
-                    .contains("inmemory, ldap");
+                    .contains("inmemory, ldap, userinfo");
         });
     }
 
