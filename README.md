@@ -45,6 +45,7 @@ Reference for the AMPS side of the contract:
 - [9. Troubleshooting](#9-troubleshooting)
 - [10. Security notes](#10-security-notes)
 - [11. Project layout and renaming the package root](#11-project-layout-and-renaming-the-package-root)
+  - [11.1 Embedding the feature in another application](#111-embedding-the-feature-in-another-application)
 - [12. Out of scope (for now)](#12-out-of-scope-for-now)
 
 ---
@@ -834,47 +835,83 @@ always names the property:
 
 ## 11. Project layout and renaming the package root
 
+The whole feature is **one flat package folder**, `src/main/java/com/example/ampsauth`: no
+sub-packages, and no imports between its own classes, so it can be copied into another project as a
+unit (see [11.1](#111-embedding-the-feature-in-another-application)). The standalone runner sits one
+level above it. (This supersedes the sub-package layout sketched in `SPEC.md` section 7.)
+
 ```
-src/main/java/com/example/ampsauth/
-  AmpsAuthApplication.java              main(); handles --hash-password before SpringApplication.run
-  config/AmpsProperties.java            validated records for every amps.* property
-  config/PermissionsConfiguration.java  @Bean that builds PermissionsDocument from amps.permissions.template
-  config/ValidatorConfiguration.java    @ConditionalOnProperty beans selecting the active backend
-  web/PermissionsController.java        the two GET mappings; maps LogonOutcome -> ResponseEntity
-  web/BasicCredentials.java             record(username, password); toString() masks the password
-  web/BasicAuthorizationParser.java     parse(header): Optional<BasicCredentials>
-  web/MalformedCredentialsException.java
-  web/CorrelationIdFilter.java          correlation id -> MDC + response header; Cache-Control: no-store
-  auth/CredentialValidator.java         the backend SPI
-  auth/ValidationResult.java            VALID | INVALID | BACKEND_UNAVAILABLE
-  auth/InMemoryCredentialValidator.java
-  auth/LdapCredentialValidator.java
-  auth/DirContextFactory.java           JNDI seam for tests
-  auth/JndiDirContextFactory.java       default impl; also implements LdapProbe
-  auth/LdapProbe.java                   connectivity check for the health indicator
-  auth/LdapHealthIndicator.java         the optional "ldap" health component
-  auth/LogonService.java                guards -> validator -> outcome; metrics; the one INFO line
-  auth/LogonOutcome.java                SUCCESS | NO_CREDENTIALS | MALFORMED | USERNAME_MISMATCH | INVALID | BACKEND_UNAVAILABLE
-  auth/RequestMetadata.java             the X-AMPS-* values, for logging only
-  auth/LogSanitizer.java                log-field sanitiser (control/whitespace/separator/= -> _, truncation)
-  permissions/PermissionsDocument.java  loads and validates the template; serves the bytes (created by PermissionsConfiguration)
-  tools/PasswordHashTool.java           --hash-password
+src/main/java/com/example/
+  AmpsAuthApplication.java          standalone runner: main(); handles --hash-password before SpringApplication.run
+src/main/java/com/example/ampsauth/ <- the feature package: copy this folder
+  AmpsAuthConfiguration.java        the single integration point: enables AmpsProperties, scans this package,
+                                    builds PermissionsDocument, selects the CredentialValidator by amps.auth.backend
+  AmpsProperties.java               validated records for every amps.* property
+  PermissionsController.java        the two GET mappings; maps LogonOutcome -> ResponseEntity
+  BasicCredentials.java             record(username, password); toString() masks the password
+  BasicAuthorizationParser.java     parse(header): Optional<BasicCredentials>
+  MalformedCredentialsException.java
+  CorrelationIdFilter.java          correlation id -> MDC + response header; Cache-Control: no-store
+  CredentialValidator.java          the backend SPI (public: implement it to add a backend)
+  ValidationResult.java             VALID | INVALID | BACKEND_UNAVAILABLE
+  InMemoryCredentialValidator.java
+  LdapCredentialValidator.java
+  DirContextFactory.java            JNDI seam for tests
+  JndiDirContextFactory.java        default impl; also implements LdapProbe
+  LdapProbe.java                    connectivity check for the health indicator
+  LdapHealthIndicator.java          the optional "ldap" health component
+  LogonService.java                 guards -> validator -> outcome; metrics; the one INFO line
+  LogonOutcome.java                 SUCCESS | NO_CREDENTIALS | MALFORMED | USERNAME_MISMATCH | INVALID | BACKEND_UNAVAILABLE
+  RequestMetadata.java              the X-AMPS-* values, for logging only
+  LogSanitizer.java                 log-field sanitiser (control/whitespace/separator/= -> _, truncation)
+  PermissionsDocument.java          loads and validates the template; serves the bytes
+  PasswordHashTool.java             --hash-password
 src/main/resources/
   application.yml
   application-local.yml
   amps/permissions-logon-only.json
+src/test/java/com/example/ampsauth/ <- the tests, one flat folder as well (copy it alongside)
 ```
+
+Only `AmpsAuthConfiguration`, `AmpsProperties`, `CredentialValidator`, `ValidationResult`,
+`LogonOutcome`, `LogonService`, `RequestMetadata` and `PasswordHashTool` are public; everything else
+is package-private, so a host application sees a small, deliberate surface.
+
+### 11.1 Embedding the feature in another application
+
+1. In IntelliJ IDEA, copy the package `com.example.ampsauth` (the folder above) into the host
+   project's source root, for example under the host's root package as
+   `com.acme.trading.ampsauth`. The copy dialog rewrites the `package` declarations; because the
+   classes never import each other, nothing else needs fixing. Copy
+   `src/test/java/com/example/ampsauth` the same way if you want the tests (they need
+   `spring-boot-starter-test` and find the host's `@SpringBootApplication` by themselves).
+2. Add the dependencies from [2.1](#21-requirements) that the host does not already have: the web
+   starter, actuator, validation and `spring-security-crypto` (**not**
+   `spring-boot-starter-security`).
+3. Copy `src/main/resources/amps/permissions-logon-only.json` into the host's resources, or point
+   `amps.permissions.template` at a file. Startup fails without a template.
+4. Add the `amps.*` settings from [4](#4-configuration-reference) to the host's `application.yml`,
+   plus the `management.*` and `server.error.*` settings from
+   [4.2](#42-server-management-and-logging-settings) if the host has no equivalents. The record
+   defaults mean the feature starts with the `inmemory` backend and no users, so every logon is
+   refused until it is configured.
+5. If the package is **not** below the host's `@SpringBootApplication` package, add
+   `@Import(AmpsAuthConfiguration.class)` to one of the host's configuration classes; that is the
+   only class the host ever references. If it is below, the normal component scan finds it.
+6. Optionally add the two `PasswordHashTool` lines from `AmpsAuthApplication.main` to the host's
+   `main` so `--hash-password` works there too.
+7. Keep the endpoint paths (`/amps/v1/permissions...`) out of any host security filter chain: this
+   package does its own authentication, and the AMPS contract needs `403`, not `401`, for bad
+   credentials. If the host uses Spring Security, permit these paths explicitly.
 
 The package root `com.example.ampsauth` is defined in exactly **one** place for the build and the
 configuration: the `base.package` property in `pom.xml`. Nothing in the Java sources or the YAML
-files spells it out as a string — `@SpringBootApplication` and `@ConfigurationPropertiesScan` scan
-from `AmpsAuthApplication`'s own package, and `application-local.yml` gets it through Maven resource
-filtering. (This README mentions the name only as documentation; the Java `package` declarations are
-moved by the refactoring below.)
+files spells it out as a string — `AmpsAuthConfiguration` enables the properties and scans its own
+package, `AmpsAuthApplication` scans from one level above, and `application-local.yml` gets it
+through Maven resource filtering. (This README mentions the name only as documentation.)
 
-**To rename it:** change `base.package` in `pom.xml`, then move the Java packages under
-`src/main/java` and `src/test/java` to match (an IDE "rename package" refactoring does the move and
-fixes every import in one step).
+**To rename it:** change `base.package` in `pom.xml`, then rename the package `com.example.ampsauth`
+in the IDE (the refactoring moves both source folders and fixes every reference in one step).
 
 ---
 

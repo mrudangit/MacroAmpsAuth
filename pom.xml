@@ -23,10 +23,12 @@
     <java.version>21</java.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <!--
-      Package root, defined in exactly one place. It is substituted into application-local.yml by
-      Maven resource filtering (Spring Boot's parent enables @..@ filtering for application*.yml).
-      To rename the package: change this value and move src/main/java and src/test/java accordingly
-      (an IDE "rename package" refactoring does the latter).
+      The feature package: one flat folder (src/main/java/com/example/ampsauth) holding every AMPS
+      authentication class, so it can be copied into another application as a unit. The value is
+      substituted into application-local.yml by Maven resource filtering (Spring Boot's parent
+      enables @..@ filtering for application*.yml). To rename the package: change this value and let
+      the IDE "rename package" refactoring move the folders under src/main/java and src/test/java.
+      The standalone runner (com.example.AmpsAuthApplication) sits one level above it.
     -->
     <base.package>com.example.ampsauth</base.package>
   </properties>
