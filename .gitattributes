@@ -1,0 +1,8 @@
+# Normalise line endings: store LF in the repo and check out LF on every platform.
+* text=auto eol=lf
+
+# Binary files are never converted.
+*.jar binary
+*.p12 binary
+*.jks binary
+*.png binary
