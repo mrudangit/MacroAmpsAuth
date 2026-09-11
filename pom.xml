@@ -55,6 +55,15 @@
       <artifactId>spring-security-crypto</artifactId>
     </dependency>
 
+    <!-- Swagger UI / OpenAPI for testing the API by hand. Off by default; switched on by the
+         springdoc.* properties (see application-local.yml). Only com.example.OpenApiConfiguration
+         uses it, so the copyable feature package stays free of this dependency. -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+      <version>3.1.1</version>
+    </dependency>
+
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>

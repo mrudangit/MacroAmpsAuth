@@ -92,7 +92,10 @@ Reference for the AMPS side of the contract:
 Dependencies are deliberately minimal: `spring-boot-starter-webmvc` (Spring Boot 4's name for the
 former `spring-boot-starter-web`), `spring-boot-starter-actuator`, `spring-boot-starter-validation`,
 and `spring-security-crypto` for `PasswordEncoder`/bcrypt. LDAP uses the JDK's own JNDI
-(`javax.naming.directory.InitialDirContext`) — no extra dependency.
+(`javax.naming.directory.InitialDirContext`) and the UserInfo backend the JDK HTTP client — no
+extra dependency. The only addition is `springdoc-openapi-starter-webmvc-ui` for Swagger UI, which is
+inert unless enabled ([2.3](#23-run-locally-and-smoke-test)) and used only by
+`com.example.OpenApiConfiguration`, outside the copyable feature package.
 
 > **`spring-boot-starter-security` is deliberately NOT a dependency.** Its auto-configuration adds a
 > login page, CSRF handling and `401`-on-bad-credentials semantics, all of which contradict the AMPS
@@ -135,6 +138,15 @@ curl -s http://localhost:8080/actuator/health/readiness
 curl -s 'http://localhost:8080/actuator/metrics/amps.logon.attempts?tag=outcome:INVALID'
 ```
 
+**Swagger UI.** With the `local` profile, Swagger UI is at <http://localhost:8080/swagger-ui.html>
+(OpenAPI document at `/v3/api-docs`). Click **Authorize**, enter the username and password (or,
+with the `userinfo` backend, the access token as the password), and try the two endpoints. It is
+**off by default** so production has no extra routes; enable it in any other environment with
+
+```bash
+java -jar target/amps-auth-service.jar --springdoc.api-docs.enabled=true --springdoc.swagger-ui.enabled=true
+```
+
 ---
 
 ## 3. HTTP API
@@ -150,7 +162,8 @@ curl -s 'http://localhost:8080/actuator/metrics/amps.logon.attempts?tag=outcome:
 
 There are no other routes: the actuator index page (`/actuator`) is disabled
 (`management.endpoints.web.discovery.enabled: false`) and only `health`, `info` and `metrics` are
-exposed. Unknown paths get Spring's default `404` with no message, exception or stack trace in the
+exposed. Swagger UI (`/swagger-ui.html`, `/swagger-ui/**`, `/v3/api-docs/**`) exists only when the
+`springdoc.*` properties enable it, as the `local` profile does ([2.3](#23-run-locally-and-smoke-test)). Unknown paths get Spring's default `404` with no message, exception or stack trace in the
 body (`server.error.include-*` are all off); an unsupported method gets the same style of `405`.
 
 > **Do not put a `.json` suffix on the AMPS `ResourceURI`.** The endpoint has none;
@@ -333,6 +346,13 @@ management:
         enabled: true                   # enables /actuator/health/liveness and /readiness
       show-details: never               # health details are never returned to a caller
 
+springdoc:
+  api-docs:
+    enabled: false                  # Swagger UI / OpenAPI off in production
+  swagger-ui:
+    enabled: false
+  paths-to-match: /amps/**
+
 logging:
   pattern:
     console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %-5level [%thread] corr=%X{ampsCorrelationId:-} %logger{36} - %msg%n"
@@ -365,6 +385,12 @@ amps:
         - username: trader2
           # bcrypt hash of "secret2", generated with: java -jar target/amps-auth-service.jar --hash-password
           password: "{bcrypt}$2a$10$Bgfxhrf7l3ZhnfFA9rUXMuCWfLeGp8IKikNruUrlC7KrDoTW.eZH2"
+# Swagger UI at http://localhost:8080/swagger-ui.html (OpenAPI document at /v3/api-docs).
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
 logging:
   level:
     # The key below is the service's package root, filled in by Maven resource filtering
@@ -924,6 +950,7 @@ level above it. (This supersedes the sub-package layout sketched in `SPEC.md` se
 ```
 src/main/java/com/example/
   AmpsAuthApplication.java          standalone runner: main(); handles --hash-password before SpringApplication.run
+  OpenApiConfiguration.java         Swagger UI / OpenAPI description (only when springdoc.api-docs.enabled=true)
 src/main/java/com/example/ampsauth/ <- the feature package: copy this folder
   AmpsAuthConfiguration.java        the single integration point: enables AmpsProperties, scans this package,
                                     builds PermissionsDocument, selects the CredentialValidator by amps.auth.backend

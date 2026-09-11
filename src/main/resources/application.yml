@@ -51,6 +51,15 @@ management:
         enabled: true
       show-details: never
 
+# Swagger UI / OpenAPI: off in production (no extra routes). Turn both on for manual testing, as the
+# local profile does; then /swagger-ui.html and /v3/api-docs exist.
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+  paths-to-match: /amps/**
+
 logging:
   pattern:
     console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %-5level [%thread] corr=%X{ampsCorrelationId:-} %logger{36} - %msg%n"

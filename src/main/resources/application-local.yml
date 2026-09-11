@@ -1,4 +1,4 @@
-# Developer profile: plain HTTP, in-memory users, plaintext allowed.
+# Developer profile: plain HTTP, in-memory users, plaintext allowed, Swagger UI on.
 # Activate with --spring.profiles.active=local. Never use this profile in production.
 amps:
   auth:
@@ -11,6 +11,12 @@ amps:
         - username: trader2
           # bcrypt hash of "secret2", generated with: java -jar target/amps-auth-service.jar --hash-password
           password: "{bcrypt}$2a$10$Bgfxhrf7l3ZhnfFA9rUXMuCWfLeGp8IKikNruUrlC7KrDoTW.eZH2"
+# Swagger UI at http://localhost:8080/swagger-ui.html (OpenAPI document at /v3/api-docs).
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
 logging:
   level:
     # The key below is the service's package root, filled in by Maven resource filtering
