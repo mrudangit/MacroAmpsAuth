@@ -1,0 +1,18 @@
+# Developer profile: plain HTTP, in-memory users, plaintext allowed.
+# Activate with --spring.profiles.active=local. Never use this profile in production.
+amps:
+  auth:
+    backend: inmemory
+    inmemory:
+      allow-plaintext: true
+      users:
+        - username: trader1
+          password: "{noop}secret"
+        - username: trader2
+          # bcrypt hash of "secret2", generated with: java -jar target/amps-auth-service.jar --hash-password
+          password: "{bcrypt}$2a$10$Bgfxhrf7l3ZhnfFA9rUXMuCWfLeGp8IKikNruUrlC7KrDoTW.eZH2"
+logging:
+  level:
+    # The key below is the service's package root, filled in by Maven resource filtering
+    # from the base.package property in pom.xml (the built file contains the real name).
+    "@base.package@": DEBUG

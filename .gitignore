@@ -1,0 +1,19 @@
+# Maven build output
+target/
+
+# IDE and editor files
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+.factorypath
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and local overrides
+*.log
+application-local-*.yml

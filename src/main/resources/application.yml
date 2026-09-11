@@ -1,0 +1,46 @@
+server:
+  port: 8080
+  error:
+    include-message: never
+    include-stacktrace: never
+    include-exception: false
+  tomcat:
+    threads:
+      max: 200
+    connection-timeout: 5s
+  # Production: terminate TLS here (AMPS verifies the certificate via its CAKey option).
+  # ssl:
+  #   bundle: amps-auth          # define under spring.ssl.bundle.pem or .jks
+  #   client-auth: none          # set to "need" to require the AMPS client certificate (mTLS)
+
+amps:
+  auth:
+    backend: inmemory                    # inmemory | ldap
+    username-path-must-match: true
+    inmemory:
+      allow-plaintext: false
+      users: []                          # see application-local.yml
+    ldap:
+      url: ldaps://ldap.example.com:636
+      user-principal-pattern: "{0}@corp.example.com"
+      connect-timeout: 1000ms
+      read-timeout: 2000ms
+  permissions:
+    template: classpath:amps/permissions-logon-only.json
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+      discovery:
+        enabled: false                     # no /actuator index page: only the routes listed in the README
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %-5level [%thread] corr=%X{ampsCorrelationId:-} %logger{36} - %msg%n"
