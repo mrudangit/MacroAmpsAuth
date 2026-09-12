@@ -1,18 +1,17 @@
 package com.example.ampsauth;
 
 import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
 
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tag;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
@@ -20,30 +19,39 @@ import tools.jackson.databind.json.JsonMapper;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-        "amps.auth.backend=inmemory",
-        "amps.auth.inmemory.allow-plaintext=true"
-})
+/**
+ * End to end: the service against a stub UserInfo endpoint. AMPS puts the username in the path and
+ * the access token in the {@code X-AMPS-Password} header (see application.yml).
+ */
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class PermissionsEndpointIntegrationTest {
 
-    static final String TRADER1_PASSWORD = "s3cret:Pa55w0rd";
-    static final String TRADER2_PASSWORD = "bcrypt-Pa55w0rd";
-    static final String JANE_PASSWORD = "jane-Pa55w0rd";
-    private static final String PATH = "/amps/v1/permissions";
+    static final String PATH = "/amps/v1/permissions";
+    static final String TOKEN_HEADER = "X-AMPS-Password";
+    static final String USER = StubUserInfoServer.USER;
 
-    /**
-     * All users live in this one property source: Spring's binder takes an indexed list from a
-     * single source, so a bcrypt hash computed here cannot be mixed with users declared elsewhere.
-     */
+    private static StubUserInfoServer stub;
+
+    static synchronized StubUserInfoServer stub() {
+        if (stub == null) {
+            stub = StubUserInfoServer.start();
+        }
+        return stub;
+    }
+
     @DynamicPropertySource
-    static void users(DynamicPropertyRegistry registry) {
-        registry.add("amps.auth.inmemory.users[0].username", () -> "trader1");
-        registry.add("amps.auth.inmemory.users[0].password", () -> "{noop}" + TRADER1_PASSWORD);
-        registry.add("amps.auth.inmemory.users[1].username", () -> "Trader2");
-        registry.add("amps.auth.inmemory.users[1].password",
-                () -> "{bcrypt}" + new BCryptPasswordEncoder(4).encode(TRADER2_PASSWORD));
-        registry.add("amps.auth.inmemory.users[2].username", () -> "jane doe");
-        registry.add("amps.auth.inmemory.users[2].password", () -> "{noop}" + JANE_PASSWORD);
+    static void userInfoEndpoint(DynamicPropertyRegistry registry) {
+        registry.add("amps.auth.userinfo.url", () -> stub().url());
+        registry.add("amps.auth.userinfo.enabled-groups", () -> "amps-users,amps-admins");
+        registry.add("amps.auth.userinfo.read-timeout", () -> "500ms");
+    }
+
+    @AfterAll
+    static void stopStub() {
+        if (stub != null) {
+            stub.close();
+            stub = null;
+        }
     }
 
     @Value("${local.server.port}")
@@ -63,9 +71,11 @@ class PermissionsEndpointIntegrationTest {
     }
 
     @Test
-    void validCredentialsReturnThePermissionsDocument() {
-        HttpResponse<byte[]> response = http.get(PATH + "/trader1",
-                "Authorization", TestHttp.basic("trader1", TRADER1_PASSWORD),
+    void validTokenReturnsThePermissionsDocument() {
+        int before = stub().authorizationHeaders.size();
+
+        HttpResponse<byte[]> response = http.get(PATH + "/" + USER,
+                TOKEN_HEADER, StubUserInfoServer.GOOD,
                 "X-AMPS-Correlation-Id", "corr-123",
                 "X-AMPS-Client-Name", "MacroDesktop-jdoe",
                 "X-AMPS-Remote-Address", "10.1.2.3",
@@ -73,69 +83,59 @@ class PermissionsEndpointIntegrationTest {
 
         assertThat(response.statusCode()).isEqualTo(200);
         assertThat(response.body()).isEqualTo(document.bytes());
-        assertThat(JsonMapper.builder().build().readTree(response.body()))
-                .isEqualTo(JsonMapper.builder().build().readTree(document.bytes()));
         assertThat(JsonMapper.builder().build().readTree(response.body()).get("logon").booleanValue()).isTrue();
         assertThat(response.headers().firstValue("Content-Type")).hasValueSatisfying(
                 value -> assertThat(value).startsWith("application/json"));
         assertThat(response.headers().firstValue("Cache-Control")).hasValue("no-store");
         assertThat(response.headers().firstValue("X-AMPS-Correlation-Id")).hasValue("corr-123");
+        // The token went to the UserInfo endpoint as a bearer token, exactly once.
+        assertThat(stub().authorizationHeaders.subList(before, stub().authorizationHeaders.size()))
+                .containsExactly("Bearer " + StubUserInfoServer.GOOD);
     }
 
     @Test
-    void wrongPasswordIsForbiddenWithEmptyBody() {
-        HttpResponse<byte[]> response = http.get(PATH + "/trader1",
-                "Authorization", TestHttp.basic("trader1", "wrong"),
-                "X-AMPS-Correlation-Id", "corr-403");
-
-        assertThat(response.statusCode()).isEqualTo(403);
-        assertThat(response.body()).isEmpty();
-        assertThat(response.headers().firstValue("Cache-Control")).hasValue("no-store");
-        assertThat(response.headers().firstValue("X-AMPS-Correlation-Id")).hasValue("corr-403");
-        assertThat(response.headers().firstValue("WWW-Authenticate")).isEmpty();
+    void pathUsernameIsComparedCaseInsensitivelyWithThePrincipalClaim() {
+        assertThat(http.get(PATH + "/" + USER.toLowerCase(), TOKEN_HEADER, StubUserInfoServer.GOOD).statusCode()).isEqualTo(200);
     }
 
     @Test
-    void unknownUserIsForbidden() {
-        HttpResponse<byte[]> response = http.get(PATH + "/nobody", "Authorization", TestHttp.basic("nobody", "x"));
-
-        assertThat(response.statusCode()).isEqualTo(403);
-        assertThat(response.body()).isEmpty();
+    void pathUsernameIsUrlDecoded() {
+        // "U000001" percent-encoded still matches the principal claim.
+        assertThat(http.get(PATH + "/%55000001", TOKEN_HEADER, StubUserInfoServer.GOOD).statusCode()).isEqualTo(200);
     }
 
     @Test
-    void missingAuthorizationIsUnauthorizedWithBasicChallenge() {
-        HttpResponse<byte[]> response = http.get(PATH + "/trader1", "X-AMPS-Correlation-Id", "corr-401");
+    void missingTokenIsChallengedWithoutCallingTheEndpoint() {
+        int before = stub().authorizationHeaders.size();
 
+        HttpResponse<byte[]> response = http.get(PATH + "/" + USER, "X-AMPS-Correlation-Id", "corr-401");
+
+        // The AMPS module probes without credentials first; the Basic challenge makes it retry with
+        // its credentials and the configured headers.
         assertThat(response.statusCode()).isEqualTo(401);
         assertThat(response.body()).isEmpty();
         assertThat(response.headers().firstValue("WWW-Authenticate")).hasValue("Basic realm=\"amps\"");
         assertThat(response.headers().firstValue("Cache-Control")).hasValue("no-store");
         assertThat(response.headers().firstValue("X-AMPS-Correlation-Id")).hasValue("corr-401");
+        assertThat(http.get(PATH + "/" + USER, TOKEN_HEADER, "   ").statusCode()).isEqualTo(401);
+        assertThat(stub().authorizationHeaders).hasSize(before);
     }
 
     @Test
-    void missingAuthorizationWinsOverPathMismatch() {
-        HttpResponse<byte[]> response = http.get(PATH + "/other");
-
-        assertThat(response.statusCode()).isEqualTo(401);
-        assertThat(response.headers().firstValue("WWW-Authenticate")).hasValue("Basic realm=\"amps\"");
+    void authorizationHeaderIsIgnoredOnlyThePasswordHeaderCounts() {
+        // The old Basic flow is gone: Basic or Bearer credentials in Authorization do not log anyone on...
+        assertThat(http.get(PATH + "/" + USER, "Authorization", "Basic dTAwMDAwMTp0b2stZ29vZC04ZjMxYzI=").statusCode())
+                .isEqualTo(401);
+        assertThat(http.get(PATH + "/" + USER, "Authorization", "Bearer " + StubUserInfoServer.GOOD).statusCode())
+                .isEqualTo(401);
+        // ...and do not get in the way when the password header is present (the module's retry sends both).
+        assertThat(http.get(PATH + "/" + USER, "Authorization", "Basic dTAwMDAwMTp3aGF0ZXZlcg==",
+                TOKEN_HEADER, StubUserInfoServer.GOOD).statusCode()).isEqualTo(200);
     }
 
     @Test
-    void longCorrelationIdIsEchoedVerbatim() {
-        String id = "c".repeat(300);
-
-        HttpResponse<byte[]> response = http.get(PATH + "/trader1",
-                "Authorization", TestHttp.basic("trader1", TRADER1_PASSWORD), "X-AMPS-Correlation-Id", id);
-
-        assertThat(response.statusCode()).isEqualTo(200);
-        assertThat(response.headers().firstValue("X-AMPS-Correlation-Id")).hasValue(id);
-    }
-
-    @Test
-    void bearerSchemeIsForbidden() {
-        HttpResponse<byte[]> response = http.get(PATH + "/trader1", "Authorization", "Bearer eyJhbGciOiJIUzI1NiJ9.e30.x");
+    void tokenRejectedByTheIdentityProviderIsForbidden() {
+        HttpResponse<byte[]> response = http.get(PATH + "/" + USER, TOKEN_HEADER, StubUserInfoServer.EXPIRED);
 
         assertThat(response.statusCode()).isEqualTo(403);
         assertThat(response.body()).isEmpty();
@@ -143,116 +143,66 @@ class PermissionsEndpointIntegrationTest {
     }
 
     @Test
-    void malformedBase64IsForbidden() {
-        HttpResponse<byte[]> response = http.get(PATH + "/trader1", "Authorization", "Basic !!not-base64!!");
-
-        assertThat(response.statusCode()).isEqualTo(403);
-        assertThat(response.body()).isEmpty();
-    }
-
-    @Test
-    void missingColonIsForbidden() {
-        String token = Base64.getEncoder().encodeToString("trader1".getBytes(StandardCharsets.UTF_8));
-
-        HttpResponse<byte[]> response = http.get(PATH + "/trader1", "Authorization", "Basic " + token);
-
-        assertThat(response.statusCode()).isEqualTo(403);
-    }
-
-    @Test
-    void emptyPasswordIsForbidden() {
-        HttpResponse<byte[]> response = http.get(PATH + "/trader1", "Authorization", TestHttp.basic("trader1", ""));
-
-        assertThat(response.statusCode()).isEqualTo(403);
-        assertThat(response.body()).isEmpty();
-    }
-
-    @Test
-    void emptyUsernameIsForbidden() {
-        HttpResponse<byte[]> response = http.get(PATH, "Authorization", TestHttp.basic("", TRADER1_PASSWORD));
-
-        assertThat(response.statusCode()).isEqualTo(403);
-    }
-
-    @Test
-    void pathUsernameMismatchIsForbidden() {
-        HttpResponse<byte[]> response = http.get(PATH + "/other", "Authorization", TestHttp.basic("trader1", TRADER1_PASSWORD));
-
-        assertThat(response.statusCode()).isEqualTo(403);
-        assertThat(response.body()).isEmpty();
-    }
-
-    @Test
-    void pathUsernameIsComparedCaseInsensitively() {
-        HttpResponse<byte[]> response = http.get(PATH + "/TRADER1", "Authorization", TestHttp.basic("trader1", TRADER1_PASSWORD));
-
-        assertThat(response.statusCode()).isEqualTo(200);
-    }
-
-    @Test
-    void pathUsernameIsUrlDecodedBeforeComparison() {
-        HttpResponse<byte[]> response = http.get(PATH + "/jane%20doe", "Authorization", TestHttp.basic("jane doe", JANE_PASSWORD));
-
-        assertThat(response.statusCode()).isEqualTo(200);
-    }
-
-    @Test
-    void endpointWithoutPathVariableWorks() {
-        HttpResponse<byte[]> response = http.get(PATH, "Authorization", TestHttp.basic("trader1", TRADER1_PASSWORD));
-
-        assertThat(response.statusCode()).isEqualTo(200);
-        assertThat(response.body()).isEqualTo(document.bytes());
-        assertThat(response.headers().firstValue("Content-Type")).hasValueSatisfying(
-                value -> assertThat(value).startsWith("application/json"));
-    }
-
-    @Test
-    void bcryptUserCanLogOnWithCaseInsensitiveUsername() {
-        assertThat(http.get(PATH + "/trader2", "Authorization", TestHttp.basic("trader2", TRADER2_PASSWORD)).statusCode())
+    void anotherUsersTokenIsForbidden() {
+        assertThat(http.get(PATH + "/" + USER, TOKEN_HEADER, StubUserInfoServer.MISMATCH).statusCode()).isEqualTo(403);
+        // ... and the same token is accepted under its own username.
+        assertThat(http.get(PATH + "/" + StubUserInfoServer.OTHER_USER, TOKEN_HEADER, StubUserInfoServer.MISMATCH).statusCode())
                 .isEqualTo(200);
-        assertThat(http.get(PATH + "/Trader2", "Authorization", TestHttp.basic("TRADER2", TRADER2_PASSWORD)).statusCode())
-                .isEqualTo(200);
-        assertThat(http.get(PATH + "/trader2", "Authorization", TestHttp.basic("trader2", "nope")).statusCode())
-                .isEqualTo(403);
     }
 
     @Test
-    void sameCredentialsAlwaysProduceTheSameAnswer() {
+    void userOutsideTheEnabledGroupsIsForbidden() {
+        assertThat(http.get(PATH + "/" + USER, TOKEN_HEADER, StubUserInfoServer.NO_GROUP).statusCode()).isEqualTo(403);
+    }
+
+    @Test
+    void tokenWithControlCharactersIsForbiddenWithoutCallingTheEndpoint() {
+        int before = stub().authorizationHeaders.size();
+
+        assertThat(http.get(PATH + "/" + USER, TOKEN_HEADER, "tok\tbad").statusCode()).isEqualTo(403);
+        assertThat(stub().authorizationHeaders).hasSize(before);
+    }
+
+    @Test
+    void identityProviderErrorIsServiceUnavailableWithEmptyBody() {
+        HttpResponse<byte[]> response = http.get(PATH + "/" + USER, TOKEN_HEADER, StubUserInfoServer.BOOM,
+                "X-AMPS-Correlation-Id", "corr-503");
+
+        assertThat(response.statusCode()).isEqualTo(503);
+        assertThat(response.body()).isEmpty();
+        assertThat(response.headers().firstValue("Cache-Control")).hasValue("no-store");
+        assertThat(response.headers().firstValue("X-AMPS-Correlation-Id")).hasValue("corr-503");
+    }
+
+    @Test
+    void garbageAndTimeoutsAreServiceUnavailable() {
+        assertThat(http.get(PATH + "/" + USER, TOKEN_HEADER, StubUserInfoServer.GARBAGE).statusCode()).isEqualTo(503);
+        assertThat(http.get(PATH + "/" + USER, TOKEN_HEADER, StubUserInfoServer.SLOW).statusCode()).isEqualTo(503);
+    }
+
+    @Test
+    void sameTokenAlwaysProducesTheSameAnswer() {
         for (int i = 0; i < 3; i++) {
-            assertThat(http.get(PATH + "/trader1", "Authorization", TestHttp.basic("trader1", TRADER1_PASSWORD)).statusCode())
-                    .isEqualTo(200);
-            assertThat(http.get(PATH + "/trader1", "Authorization", TestHttp.basic("trader1", "wrong")).statusCode())
-                    .isEqualTo(403);
+            assertThat(http.get(PATH + "/" + USER, TOKEN_HEADER, StubUserInfoServer.GOOD).statusCode()).isEqualTo(200);
+            assertThat(http.get(PATH + "/" + USER, TOKEN_HEADER, StubUserInfoServer.EXPIRED).statusCode()).isEqualTo(403);
         }
     }
 
     @Test
-    void unknownPathIsNotFoundWithoutDetails() {
-        HttpResponse<byte[]> response = http.get("/amps/v1/other", "Authorization", TestHttp.basic("trader1", TRADER1_PASSWORD));
-
-        assertThat(response.statusCode()).isEqualTo(404);
-        assertThat(TestHttp.body(response)).doesNotContain("trace").doesNotContain("Exception");
-    }
-
-    @Test
-    void trailingSlashIsNotARoute() {
-        HttpResponse<byte[]> response = http.get(PATH + "/trader1/", "Authorization", TestHttp.basic("trader1", TRADER1_PASSWORD));
-
-        assertThat(response.statusCode()).isEqualTo(404);
-    }
-
-    @Test
-    void postIsNotAllowed() {
-        HttpResponse<byte[]> response = http.send("POST", PATH + "/trader1", "Authorization", TestHttp.basic("trader1", TRADER1_PASSWORD));
-
-        assertThat(response.statusCode()).isEqualTo(405);
+    void onlyThePathVariableRouteExists() {
+        assertThat(http.get(PATH, TOKEN_HEADER, StubUserInfoServer.GOOD).statusCode()).isEqualTo(404);
+        assertThat(http.get(PATH + "/" + USER + "/", TOKEN_HEADER, StubUserInfoServer.GOOD).statusCode()).isEqualTo(404);
+        HttpResponse<byte[]> other = http.get("/amps/v1/other", TOKEN_HEADER, StubUserInfoServer.GOOD);
+        assertThat(other.statusCode()).isEqualTo(404);
+        assertThat(TestHttp.body(other)).doesNotContain("trace").doesNotContain("Exception");
+        assertThat(http.send("POST", PATH + "/" + USER, TOKEN_HEADER, StubUserInfoServer.GOOD).statusCode()).isEqualTo(405);
     }
 
     @Test
     void healthAndProbesAreExposedWithoutDetails() {
         HttpResponse<byte[]> health = http.get("/actuator/health");
         assertThat(health.statusCode()).isEqualTo(200);
-        assertThat(TestHttp.body(health)).contains("\"status\":\"UP\"").doesNotContain("diskSpace");
+        assertThat(TestHttp.body(health)).contains("\"status\":\"UP\"").doesNotContain("userInfo").doesNotContain("url");
 
         assertThat(http.get("/actuator/health/liveness").statusCode()).isEqualTo(200);
         assertThat(http.get("/actuator/health/readiness").statusCode()).isEqualTo(200);
@@ -265,17 +215,19 @@ class PermissionsEndpointIntegrationTest {
         assertThat(http.get("/actuator/env").statusCode()).isEqualTo(404);
         assertThat(http.get("/actuator/configprops").statusCode()).isEqualTo(404);
         assertThat(http.get("/actuator/loggers").statusCode()).isEqualTo(404);
+        assertThat(http.get("/swagger-ui/index.html").statusCode()).isEqualTo(404);
+        assertThat(http.get("/v3/api-docs").statusCode()).isEqualTo(404);
     }
 
     @Test
     void logonMetricsAreTaggedByOutcomeOnly() {
-        http.get(PATH + "/trader1", "Authorization", TestHttp.basic("trader1", TRADER1_PASSWORD));
-        http.get(PATH + "/trader1", "Authorization", TestHttp.basic("trader1", "wrong"));
+        http.get(PATH + "/" + USER, TOKEN_HEADER, StubUserInfoServer.GOOD);
+        http.get(PATH + "/" + USER, TOKEN_HEADER, StubUserInfoServer.EXPIRED);
 
         assertThat(meterRegistry.get(LogonService.ATTEMPTS_METRIC)
                 .tag(LogonService.OUTCOME_TAG, LogonOutcome.SUCCESS.name()).counter().count()).isPositive();
         assertThat(meterRegistry.get(LogonService.ATTEMPTS_METRIC)
-                .tag(LogonService.OUTCOME_TAG, LogonOutcome.INVALID.name()).counter().count()).isPositive();
+                .tag(LogonService.OUTCOME_TAG, LogonOutcome.INVALID_TOKEN.name()).counter().count()).isPositive();
         assertThat(meterRegistry.get(LogonService.DURATION_METRIC)
                 .tag(LogonService.OUTCOME_TAG, LogonOutcome.SUCCESS.name()).timer().count()).isPositive();
         for (Meter meter : meterRegistry.getMeters()) {
@@ -284,8 +236,32 @@ class PermissionsEndpointIntegrationTest {
             }
         }
 
-        HttpResponse<byte[]> metrics = http.get("/actuator/metrics/" + LogonService.ATTEMPTS_METRIC + "?tag=outcome:INVALID");
+        HttpResponse<byte[]> metrics = http.get("/actuator/metrics/" + LogonService.ATTEMPTS_METRIC + "?tag=outcome:INVALID_TOKEN");
         assertThat(metrics.statusCode()).isEqualTo(200);
-        assertThat(TestHttp.body(metrics)).contains(LogonService.ATTEMPTS_METRIC).doesNotContain("trader1");
+        assertThat(TestHttp.body(metrics)).contains(LogonService.ATTEMPTS_METRIC).doesNotContain(USER);
+    }
+
+    /** The header name is configurable; the default name is then ignored. */
+    @Nested
+    @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+            properties = "amps.auth.password-header=X-Access-Token")
+    class CustomHeaderName {
+
+        @DynamicPropertySource
+        static void userInfoEndpoint(DynamicPropertyRegistry registry) {
+            registry.add("amps.auth.userinfo.url", () -> stub().url());
+            registry.add("amps.auth.userinfo.enabled-groups", () -> "amps-users");
+        }
+
+        @Value("${local.server.port}")
+        private int nestedPort;
+
+        @Test
+        void theConfiguredHeaderCarriesTheToken() {
+            TestHttp nested = new TestHttp(nestedPort);
+
+            assertThat(nested.get(PATH + "/" + USER, "X-Access-Token", StubUserInfoServer.GOOD).statusCode()).isEqualTo(200);
+            assertThat(nested.get(PATH + "/" + USER, TOKEN_HEADER, StubUserInfoServer.GOOD).statusCode()).isEqualTo(401);
+        }
     }
 }

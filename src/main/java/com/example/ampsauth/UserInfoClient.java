@@ -3,8 +3,8 @@ package com.example.ampsauth;
 import java.io.IOException;
 
 /**
- * Isolates the HTTP call to the UserInfo endpoint so {@link UserInfoCredentialValidator} can be
- * tested with a fake. The default implementation is {@link JdkUserInfoClient}.
+ * Isolates the HTTP call to the UserInfo endpoint so {@link UserInfoAuthenticator} can be tested
+ * with a fake. The default implementation is {@link JdkUserInfoClient}.
  */
 interface UserInfoClient {
 

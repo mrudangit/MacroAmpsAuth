@@ -2,7 +2,6 @@ package com.example.ampsauth;
 
 import java.util.EnumMap;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 import io.micrometer.core.instrument.Counter;
@@ -13,10 +12,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
- * Orchestrates one logon attempt: guards (in the order of the response table) -> credential
- * validator -> {@link LogonOutcome}. Records the {@code amps.logon.attempts} counter and the
- * {@code amps.logon.duration} timer (both tagged only with {@code outcome}) and writes exactly one
- * INFO line per attempt. The password never reaches a log, a metric tag or an exception message.
+ * Orchestrates one logon attempt: guards -> {@link UserInfoAuthenticator} -> {@link LogonOutcome}.
+ * Records the {@code amps.logon.attempts} counter and the {@code amps.logon.duration} timer (both
+ * tagged only with {@code outcome}) and writes exactly one INFO line per attempt. The token never
+ * reaches a log, a metric tag or an exception message.
  */
 @Service
 public class LogonService {
@@ -27,50 +26,40 @@ public class LogonService {
 
     private static final Logger log = LoggerFactory.getLogger(LogonService.class);
 
-    private final BasicAuthorizationParser parser;
-    private final CredentialValidator validator;
-    private final boolean usernamePathMustMatch;
+    private final UserInfoAuthenticator authenticator;
     private final Map<LogonOutcome, Counter> attempts = new EnumMap<>(LogonOutcome.class);
     private final Map<LogonOutcome, Timer> durations = new EnumMap<>(LogonOutcome.class);
 
-    public LogonService(BasicAuthorizationParser parser, CredentialValidator validator,
-            AmpsProperties properties, MeterRegistry meterRegistry) {
-        this.parser = parser;
-        this.validator = validator;
-        this.usernamePathMustMatch = properties.auth().usernamePathMustMatch();
+    LogonService(UserInfoAuthenticator authenticator, MeterRegistry meterRegistry) {
+        this.authenticator = authenticator;
         for (LogonOutcome outcome : LogonOutcome.values()) {
             attempts.put(outcome, Counter.builder(ATTEMPTS_METRIC)
                     .description("Logon attempts by outcome")
                     .tag(OUTCOME_TAG, outcome.name())
                     .register(meterRegistry));
             durations.put(outcome, Timer.builder(DURATION_METRIC)
-                    .description("Logon handling time including the credential backend")
+                    .description("Logon handling time including the UserInfo call")
                     .tag(OUTCOME_TAG, outcome.name())
                     .register(meterRegistry));
         }
     }
 
     /**
-     * @param pathUsername        the {@code {username}} path variable, if the request had one
-     * @param authorizationHeader the raw {@code Authorization} header, or {@code null}
-     * @param metadata            optional {@code X-AMPS-*} headers, for the log line only
+     * @param username    the {@code {username}} path variable AMPS substituted for {@code {{USER_NAME}}}
+     * @param accessToken the value of the password header (the AMPS logon password), or {@code null}
+     * @param metadata    optional {@code X-AMPS-*} headers, for the log line only
      */
-    public LogonOutcome logon(Optional<String> pathUsername, String authorizationHeader, RequestMetadata metadata) {
+    public LogonOutcome logon(String username, String accessToken, RequestMetadata metadata) {
         long start = System.nanoTime();
         RequestMetadata meta = metadata == null ? RequestMetadata.EMPTY : metadata;
-        String username = null;
         LogonOutcome outcome;
-        try {
-            Optional<BasicCredentials> credentials = parser.parse(authorizationHeader);
-            if (credentials.isEmpty()) {
-                outcome = LogonOutcome.NO_CREDENTIALS;
-            } else {
-                username = credentials.get().username();
-                outcome = authenticate(credentials.get(), pathUsername == null ? Optional.empty() : pathUsername);
-            }
-        } catch (MalformedCredentialsException e) {
-            log.debug("malformed Authorization header: {}", e.getMessage());
-            outcome = LogonOutcome.MALFORMED;
+        if (accessToken == null || accessToken.isBlank()) {
+            outcome = LogonOutcome.NO_TOKEN;
+        } else if (username == null || username.isBlank()) {
+            // A blank path username can never equal a principal claim; do not call the endpoint for it.
+            outcome = LogonOutcome.PRINCIPAL_MISMATCH;
+        } else {
+            outcome = authenticate(username, accessToken);
         }
         long elapsedNanos = System.nanoTime() - start;
         attempts.get(outcome).increment();
@@ -82,26 +71,18 @@ public class LogonService {
         return outcome;
     }
 
-    private LogonOutcome authenticate(BasicCredentials credentials, Optional<String> pathUsername) {
-        if (usernamePathMustMatch && pathUsername.isPresent()
-                && !pathUsername.get().equalsIgnoreCase(credentials.username())) {
-            return LogonOutcome.USERNAME_MISMATCH;
-        }
-        ValidationResult result;
+    private LogonOutcome authenticate(String username, String accessToken) {
+        LogonOutcome outcome;
         try {
-            result = validator.validate(credentials.username(), credentials.password());
+            outcome = authenticator.authenticate(username, accessToken);
         } catch (RuntimeException e) {
-            log.error("credential backend threw for user={}", LogSanitizer.clean(credentials.username()), e);
+            log.error("authentication failed unexpectedly for user={}", LogSanitizer.clean(username), e);
             return LogonOutcome.BACKEND_UNAVAILABLE;
         }
-        if (result == null) {
-            log.error("credential backend returned null for user={}", LogSanitizer.clean(credentials.username()));
+        if (outcome == null) {
+            log.error("authenticator returned null for user={}", LogSanitizer.clean(username));
             return LogonOutcome.BACKEND_UNAVAILABLE;
         }
-        return switch (result) {
-            case VALID -> LogonOutcome.SUCCESS;
-            case INVALID -> LogonOutcome.INVALID;
-            case BACKEND_UNAVAILABLE -> LogonOutcome.BACKEND_UNAVAILABLE;
-        };
+        return outcome;
     }
 }

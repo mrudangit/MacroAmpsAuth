@@ -1,16 +1,11 @@
-# Developer profile: plain HTTP, in-memory users, plaintext allowed, Swagger UI on.
+# Developer profile: plain HTTP, Swagger UI on, DEBUG logging, UserInfo endpoint on localhost.
 # Activate with --spring.profiles.active=local. Never use this profile in production.
 amps:
   auth:
-    backend: inmemory
-    inmemory:
-      allow-plaintext: true
-      users:
-        - username: trader1
-          password: "{noop}secret"
-        - username: trader2
-          # bcrypt hash of "secret2", generated with: java -jar target/amps-auth-service.jar --hash-password
-          password: "{bcrypt}$2a$10$Bgfxhrf7l3ZhnfFA9rUXMuCWfLeGp8IKikNruUrlC7KrDoTW.eZH2"
+    userinfo:
+      # Point this at a real identity provider, or at the stub described in the README ("Run locally").
+      url: http://localhost:9999/userinfo
+      enabled-groups: [amps-users]
 # Swagger UI at http://localhost:8080/swagger-ui.html (OpenAPI document at /v3/api-docs).
 springdoc:
   api-docs:

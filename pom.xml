@@ -34,8 +34,7 @@
   </properties>
 
   <dependencies>
-    <!-- Spring MVC + embedded Tomcat. In Spring Boot 4 this starter replaced spring-boot-starter-web
-         (the old name still exists but is deprecated in favour of this one). -->
+    <!-- Spring MVC + embedded Tomcat (Spring Boot 4's name for the former spring-boot-starter-web). -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-webmvc</artifactId>
@@ -47,12 +46,6 @@
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-validation</artifactId>
-    </dependency>
-    <!-- PasswordEncoder / bcrypt only. Deliberately NOT spring-boot-starter-security: its
-         auto-configuration (login page, CSRF, 401 on bad credentials) contradicts the AMPS contract. -->
-    <dependency>
-      <groupId>org.springframework.security</groupId>
-      <artifactId>spring-security-crypto</artifactId>
     </dependency>
 
     <!-- Swagger UI / OpenAPI for testing the API by hand. Off by default; switched on by the
@@ -68,13 +61,18 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
       <scope>test</scope>
-    </dependency>
-    <!-- Loaded as -javaagent for Mockito's inline mock maker (see surefire argLine) so that the
-         JDK does not have to self-attach an agent at runtime. -->
-    <dependency>
-      <groupId>net.bytebuddy</groupId>
-      <artifactId>byte-buddy-agent</artifactId>
-      <scope>test</scope>
+      <!-- The tests use fakes and a local stub server, not Mockito. Leaving Mockito out also keeps
+           Spring Boot's test listeners from self-attaching the byte-buddy agent (a JDK warning). -->
+      <exclusions>
+        <exclusion>
+          <groupId>org.mockito</groupId>
+          <artifactId>mockito-core</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.mockito</groupId>
+          <artifactId>mockito-junit-jupiter</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
   </dependencies>
 
@@ -85,26 +83,6 @@
       <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
-      </plugin>
-      <plugin>
-        <!-- Exposes ${net.bytebuddy:byte-buddy-agent:jar} for the surefire argLine below. -->
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-dependency-plugin</artifactId>
-        <executions>
-          <execution>
-            <goals>
-              <goal>properties</goal>
-            </goals>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-surefire-plugin</artifactId>
-        <configuration>
-          <!-- quoted so a local repository path containing spaces still works -->
-          <argLine>"-javaagent:${net.bytebuddy:byte-buddy-agent:jar}" -Xshare:off</argLine>
-        </configuration>
       </plugin>
     </plugins>
   </build>

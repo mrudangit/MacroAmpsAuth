@@ -35,7 +35,7 @@ class JdkUserInfoClientTest {
         server.createContext("/userinfo", exchange -> {
             lastHeaders.clear();
             exchange.getRequestHeaders().forEach((k, v) -> lastHeaders.put(k.toLowerCase(), v));
-            byte[] body = "{\"preferred_username\":\"trader1\",\"groups\":[\"amps-users\"]}".getBytes(StandardCharsets.UTF_8);
+            byte[] body = "{\"sub\":\"U000001\",\"csgroups\":[\"amps-users\"]}".getBytes(StandardCharsets.UTF_8);
             int status = exchange.getRequestHeaders().containsKey("Authorization") ? 200 : 401;
             exchange.getResponseHeaders().add("Content-Type", "application/json");
             exchange.sendResponseHeaders(status, body.length);
@@ -72,8 +72,7 @@ class JdkUserInfoClientTest {
     }
 
     private static AmpsProperties.UserInfo config(String url, Duration connect, Duration read) {
-        return new AmpsProperties.UserInfo(url, "preferred_username", "groups", List.of("amps-users"), true,
-                connect, read, true);
+        return new AmpsProperties.UserInfo(url, "sub", "csgroups", List.of("amps-users"), connect, read, true);
     }
 
     @Test
@@ -83,7 +82,7 @@ class JdkUserInfoClientTest {
         UserInfoClient.UserInfoResponse response = client.fetch("tok-123");
 
         assertThat(response.statusCode()).isEqualTo(200);
-        assertThat(response.body()).contains("\"preferred_username\":\"trader1\"");
+        assertThat(response.body()).contains("\"sub\":\"U000001\"");
         assertThat(lastHeaders.get("authorization")).containsExactly("Bearer tok-123");
         assertThat(lastHeaders.get("accept")).containsExactly("application/json");
     }

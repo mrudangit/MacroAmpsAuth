@@ -15,26 +15,17 @@ server:
 
 amps:
   auth:
-    backend: inmemory                    # inmemory | ldap | userinfo
-    username-path-must-match: true
-    inmemory:
-      allow-plaintext: false
-      users: []                          # see application-local.yml
-    ldap:
-      url: ldaps://ldap.example.com:636
-      user-principal-pattern: "{0}@corp.example.com"
-      connect-timeout: 1000ms
-      read-timeout: 2000ms
-    # userinfo: the AMPS password is an OAuth2/OIDC access token (e.g. from a PKCE flow); the service
-    # calls the UserInfo endpoint with it and requires a principal match plus an enabled group.
+    # AMPS puts the logon password (the OAuth2 access token) in this header:
+    #   <HTTPHeader>X-AMPS-Password: {{AMPS_PASSWORD}}</HTTPHeader>
+    password-header: X-AMPS-Password
     userinfo:
       url: https://login.example.com/oauth2/userinfo
-      principal-claim: preferred_username   # must equal the AMPS username (case-insensitive)
-      groups-claim: groups                  # exact claim name, or a dotted path such as realm_access.roles
-      enabled-groups: []                    # e.g. [amps-users, amps-admins]; at least one is required
-      principal-must-match: true
+      principal-claim: sub                  # must equal the username AMPS put in the path (case-insensitive)
+      groups-claim: csgroups                # array of group names in the UserInfo response
+      enabled-groups: []                    # e.g. [AMPS_PROD_USERS]; empty = every user with a valid token may log on
       connect-timeout: 1000ms
       read-timeout: 2000ms
+      health-indicator-enabled: true
   permissions:
     template: classpath:amps/permissions-logon-only.json
 

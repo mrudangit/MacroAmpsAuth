@@ -1,20 +1,24 @@
 package com.example.ampsauth;
 
 /**
- * Outcome of one logon attempt, in the order the guards are applied (see the response table in the
- * README / spec section 4.3). The controller maps each value to an HTTP status.
+ * Outcome of one logon attempt, in the order the checks are applied. The controller maps each value
+ * to an HTTP status; the log line and the metrics carry the name.
  */
 public enum LogonOutcome {
-    /** Credentials valid: 200 + permissions document. */
+    /** Token accepted, principal matches, group check passed: 200 + permissions document. */
     SUCCESS,
-    /** No {@code Authorization} header: 401 + {@code WWW-Authenticate: Basic}. */
-    NO_CREDENTIALS,
-    /** Header present but not usable (wrong scheme, bad base64, no colon, empty username/password): 403. */
-    MALFORMED,
-    /** Path username differs from the Basic-auth username: 403. */
-    USERNAME_MISMATCH,
-    /** Backend rejected the credentials: 403. */
-    INVALID,
-    /** Backend unreachable, timed out or threw: 503. */
+    /**
+     * The password header is missing or blank: 401 + {@code WWW-Authenticate: Basic}, the challenge
+     * that makes the AMPS module retry with its credentials and headers. Nothing is sent to the
+     * UserInfo endpoint.
+     */
+    NO_TOKEN,
+    /** The UserInfo endpoint answered 401 or 403, or the token could never be valid: 403. */
+    INVALID_TOKEN,
+    /** The token is valid but belongs to a different user than the one in the path: 403. */
+    PRINCIPAL_MISMATCH,
+    /** The token is valid and the user matches, but is in none of the enabled groups: 403. */
+    NOT_ENTITLED,
+    /** UserInfo endpoint unreachable, timed out, or answered something unusable: 503. */
     BACKEND_UNAVAILABLE
 }

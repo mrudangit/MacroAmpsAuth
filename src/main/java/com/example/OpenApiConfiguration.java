@@ -1,6 +1,7 @@
 package com.example;
 
 import com.example.ampsauth.AmpsAuthConfiguration;
+import com.example.ampsauth.AmpsProperties;
 
 import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
@@ -26,55 +27,57 @@ import org.springframework.context.annotation.Configuration;
 @ConditionalOnBooleanProperty("springdoc.api-docs.enabled")
 public class OpenApiConfiguration {
 
-    static final String BASIC_AUTH = "basicAuth";
+    static final String ACCESS_TOKEN = "accessToken";
     private static final String PERMISSIONS_CONTROLLER = AmpsAuthConfiguration.class.getPackageName() + ".PermissionsController";
 
     @Bean
-    OpenAPI ampsAuthOpenApi() {
+    OpenAPI ampsAuthOpenApi(AmpsProperties properties) {
+        String header = properties.auth().passwordHeader();
         return new OpenAPI()
                 .info(new Info()
                         .title("AMPS Logon Authentication Service")
                         .version("v1")
                         .description("Authentication web service for the AMPS RESTful Authentication and "
-                                + "Entitlement module. Click Authorize and enter the AMPS logon username and "
-                                + "password (with the userinfo backend: the OAuth2 access token as the password)."))
-                .components(new Components().addSecuritySchemes(BASIC_AUTH, new SecurityScheme()
-                        .type(SecurityScheme.Type.HTTP)
-                        .scheme("basic")
-                        .description("HTTP Basic: the AMPS logon username and password")))
-                .addSecurityItem(new SecurityRequirement().addList(BASIC_AUTH));
+                                + "Entitlement module. Click Authorize and paste the OAuth2 access token "
+                                + "(AMPS sends the logon password in the " + header + " header); then call the "
+                                + "endpoint with the AMPS username in the path."))
+                .components(new Components().addSecuritySchemes(ACCESS_TOKEN, new SecurityScheme()
+                        .type(SecurityScheme.Type.APIKEY)
+                        .in(SecurityScheme.In.HEADER)
+                        .name(header)
+                        .description("The OAuth2 access token that AMPS forwards as the logon password")))
+                .addSecurityItem(new SecurityRequirement().addList(ACCESS_TOKEN));
     }
 
-    /**
-     * Documents the logon endpoints: the Authorization header comes from the Authorize button rather
-     * than a header field, and the responses follow the service contract.
-     */
+    /** Documents the logon endpoint: summary, description and the responses of the service contract. */
     @Bean
-    OperationCustomizer ampsAuthOperationCustomizer() {
+    OperationCustomizer ampsAuthOperationCustomizer(AmpsProperties properties) {
+        String header = properties.auth().passwordHeader();
         return (operation, handlerMethod) -> {
             if (!PERMISSIONS_CONTROLLER.equals(handlerMethod.getBeanType().getName())) {
                 return operation;
             }
             if (operation.getParameters() != null) {
-                operation.getParameters().removeIf(p -> "Authorization".equalsIgnoreCase(p.getName()));
+                operation.getParameters().removeIf(p -> header.equalsIgnoreCase(p.getName()));
             }
             operation.setSummary("Authenticate an AMPS logon");
-            operation.setDescription("Validates the Basic-auth credentials against the configured backend. "
-                    + "The identity is always the Basic-auth username; the path variable, if present, is only "
-                    + "cross-checked against it.");
+            operation.setDescription("Sends the access token from the " + header + " header to the UserInfo "
+                    + "endpoint and requires its principal claim to equal the username in the path "
+                    + "(and, if configured, membership of an enabled group).");
             operation.setResponses(new ApiResponses()
                     .addApiResponse("200", new ApiResponse()
-                            .description("Credentials valid: the permissions document")
+                            .description("Logon accepted: the permissions document")
                             .content(new Content().addMediaType("application/json", new MediaType()
                                     .schema(new ObjectSchema())
                                     .example("{\"logon\": true, \"replication-logon\": false}"))))
                     .addApiResponse("401", new ApiResponse()
-                            .description("No Authorization header; WWW-Authenticate: Basic realm=\"amps\". Empty body."))
+                            .description("No token in the " + header + " header; WWW-Authenticate: Basic realm=\"amps\" "
+                                    + "makes the AMPS module retry with its credentials and headers. Empty body."))
                     .addApiResponse("403", new ApiResponse()
-                            .description("Rejected: wrong password or token, non-Basic scheme, malformed header, "
-                                    + "empty username or password, or path username mismatch. Empty body."))
+                            .description("Refused: token rejected by the identity provider, token of another user, "
+                                    + "or user not in an enabled group. Empty body."))
                     .addApiResponse("503", new ApiResponse()
-                            .description("Credential backend unavailable (LDAP, UserInfo endpoint). Empty body.")));
+                            .description("UserInfo endpoint unreachable, timed out or unusable. Empty body.")));
             return operation;
         };
     }

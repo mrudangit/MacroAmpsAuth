@@ -7,12 +7,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Base64;
 
 /**
- * Minimal HTTP client for integration tests, built on the JDK client so that any header value
- * (including deliberately malformed {@code Authorization} values) can be sent verbatim and every
- * status code is returned rather than thrown.
+ * Minimal HTTP client for integration tests, built on the JDK client so that any header value can
+ * be sent verbatim and every status code is returned rather than thrown.
  */
 public final class TestHttp {
 
@@ -46,12 +44,6 @@ public final class TestHttp {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("interrupted", e);
         }
-    }
-
-    /** {@code Basic base64(username:password)} */
-    public static String basic(String username, String password) {
-        return "Basic " + Base64.getEncoder()
-                .encodeToString((username + ":" + password).getBytes(StandardCharsets.UTF_8));
     }
 
     public static String body(HttpResponse<byte[]> response) {

@@ -34,10 +34,7 @@ class OpenApiIntegrationTest {
     @Nested
     @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
             "springdoc.api-docs.enabled=true",
-            "springdoc.swagger-ui.enabled=true",
-            "amps.auth.inmemory.allow-plaintext=true",
-            "amps.auth.inmemory.users[0].username=trader1",
-            "amps.auth.inmemory.users[0].password={noop}secret"
+            "springdoc.swagger-ui.enabled=true"
     })
     class EnabledByProperties {
 
@@ -45,7 +42,7 @@ class OpenApiIntegrationTest {
         private int port;
 
         @Test
-        void openApiDocumentDescribesTheLogonEndpoints() {
+        void openApiDocumentDescribesTheLogonEndpointAndTheTokenHeader() {
             TestHttp http = new TestHttp(port);
 
             HttpResponse<byte[]> docs = http.get("/v3/api-docs");
@@ -53,13 +50,18 @@ class OpenApiIntegrationTest {
             String json = TestHttp.body(docs);
             assertThat(json)
                     .contains("\"/amps/v1/permissions/{username}\"")
-                    .contains("\"/amps/v1/permissions\"")
-                    .contains("\"basicAuth\"")
+                    .doesNotContain("\"/amps/v1/permissions\"")
+                    .contains("\"accessToken\"")
+                    .contains("\"type\":\"apiKey\"")
+                    .contains("\"in\":\"header\"")
+                    .contains("\"name\":\"X-AMPS-Password\"")
                     .contains("\"401\"")
                     .contains("\"403\"")
                     .contains("\"503\"")
-                    .doesNotContain("\"name\":\"Authorization\"")
+                    .doesNotContain("basicAuth")
                     .doesNotContain("/actuator");
+            // The token header is offered through Authorize, not as a per-operation parameter.
+            assertThat(json.split("\"X-AMPS-Password\"")).hasSize(2);
         }
 
         @Test
@@ -75,9 +77,7 @@ class OpenApiIntegrationTest {
         void theApiItselfStillBehavesTheSame() {
             TestHttp http = new TestHttp(port);
 
-            assertThat(http.get("/amps/v1/permissions/trader1", "Authorization", TestHttp.basic("trader1", "secret")).statusCode())
-                    .isEqualTo(200);
-            assertThat(http.get("/amps/v1/permissions/trader1").statusCode()).isEqualTo(401);
+            assertThat(http.get("/amps/v1/permissions/U000001").statusCode()).isEqualTo(401);
         }
     }
 }

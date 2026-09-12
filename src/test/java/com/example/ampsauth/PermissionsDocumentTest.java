@@ -107,7 +107,7 @@ class PermissionsDocumentTest {
     @Test
     void fileResourceIsServedVerbatim(@TempDir Path dir) throws IOException {
         Path file = dir.resolve("custom.json");
-        String content = "{\"logon\":true,\"topic\":[{\"topic\":\"orders\",\"allow\":true}]}\n";
+        String content = "{\"logon\":true,\"topic\":[{\"topic\":\"orders\",\"read\":true,\"write\":false}]}\n";
         Files.writeString(file, content, StandardCharsets.UTF_8);
 
         PermissionsDocument document = new PermissionsDocument("file:" + file.toAbsolutePath(), resourceLoader);

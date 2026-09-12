@@ -1,197 +1,127 @@
 package com.example.ampsauth;
 
-import java.nio.charset.StandardCharsets;
+import java.io.IOException;
 import java.time.Duration;
-import java.util.Base64;
 import java.util.List;
-import java.util.Optional;
 
-import io.micrometer.core.instrument.Meter;
-import io.micrometer.core.instrument.Tag;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
 
-@ExtendWith(MockitoExtension.class)
+@ExtendWith(OutputCaptureExtension.class)
 class LogonServiceTest {
 
-    private static final RequestMetadata META = new RequestMetadata("MacroDesktop-jdoe", "10.1.2.3", "json-tcp-17");
+    private static final String USER = "U000001";
+    private static final String TOKEN = "tok-unit-9a1b";
 
-    @Mock
-    private CredentialValidator validator;
+    private final MeterRegistry meterRegistry = new SimpleMeterRegistry();
 
-    private SimpleMeterRegistry registry;
-
-    private LogonService service;
-
-    private static AmpsProperties properties(boolean usernamePathMustMatch) {
-        return new AmpsProperties(
-                new AmpsProperties.Auth(AmpsProperties.Backend.INMEMORY, usernamePathMustMatch,
-                        new AmpsProperties.InMemory(false, List.of()),
-                        new AmpsProperties.Ldap(null, null, Duration.ofSeconds(1), Duration.ofSeconds(2), true),
-                        new AmpsProperties.UserInfo(null, "preferred_username", "groups", List.of(), true,
-                                Duration.ofSeconds(1), Duration.ofSeconds(2), true)),
-                new AmpsProperties.Permissions("classpath:amps/permissions-logon-only.json"));
+    private static AmpsProperties.UserInfo config(String... enabledGroups) {
+        return new AmpsProperties.UserInfo("https://login.example.com/oauth2/userinfo", "sub", "csgroups",
+                List.of(enabledGroups), Duration.ofSeconds(1), Duration.ofSeconds(2), true);
     }
 
-    private static String basic(String pair) {
-        return "Basic " + Base64.getEncoder().encodeToString(pair.getBytes(StandardCharsets.UTF_8));
+    private LogonService service(UserInfoAuthenticatorTest.FakeClient client) {
+        return new LogonService(new UserInfoAuthenticator(config("amps-users"), client), meterRegistry);
     }
 
-    @BeforeEach
-    void setUp() {
-        registry = new SimpleMeterRegistry();
-        service = new LogonService(new BasicAuthorizationParser(), validator, properties(true), registry);
-    }
-
-    private double attempts(LogonOutcome outcome) {
-        return registry.get(LogonService.ATTEMPTS_METRIC).tag(LogonService.OUTCOME_TAG, outcome.name()).counter().count();
+    private double count(LogonOutcome outcome) {
+        return meterRegistry.get(LogonService.ATTEMPTS_METRIC).tag(LogonService.OUTCOME_TAG, outcome.name()).counter().count();
     }
 
     private long timed(LogonOutcome outcome) {
-        return registry.get(LogonService.DURATION_METRIC).tag(LogonService.OUTCOME_TAG, outcome.name()).timer().count();
+        return meterRegistry.get(LogonService.DURATION_METRIC).tag(LogonService.OUTCOME_TAG, outcome.name()).timer().count();
     }
 
     @Test
-    void missingHeaderIsNoCredentials() {
-        assertThat(service.logon(Optional.of("trader1"), null, META)).isEqualTo(LogonOutcome.NO_CREDENTIALS);
-        assertThat(service.logon(Optional.of("trader1"), "  ", META)).isEqualTo(LogonOutcome.NO_CREDENTIALS);
+    void missingOrBlankTokenIsNoTokenAndNeverReachesTheEndpoint() {
+        var client = new UserInfoAuthenticatorTest.FakeClient(200, "{\"sub\":\"" + USER + "\",\"csgroups\":[\"amps-users\"]}");
+        LogonService service = service(client);
 
-        verifyNoInteractions(validator);
-        assertThat(attempts(LogonOutcome.NO_CREDENTIALS)).isEqualTo(2);
-        assertThat(timed(LogonOutcome.NO_CREDENTIALS)).isEqualTo(2);
+        assertThat(service.logon(USER, null, RequestMetadata.EMPTY)).isEqualTo(LogonOutcome.NO_TOKEN);
+        assertThat(service.logon(USER, "", RequestMetadata.EMPTY)).isEqualTo(LogonOutcome.NO_TOKEN);
+        assertThat(service.logon(USER, "   ", RequestMetadata.EMPTY)).isEqualTo(LogonOutcome.NO_TOKEN);
+        assertThat(client.tokens).isEmpty();
+        assertThat(count(LogonOutcome.NO_TOKEN)).isEqualTo(3.0);
     }
 
     @Test
-    void nonBasicSchemeIsMalformed() {
-        assertThat(service.logon(Optional.of("trader1"), "Bearer abc", META)).isEqualTo(LogonOutcome.MALFORMED);
-        assertThat(service.logon(Optional.of("trader1"), "Digest username=\"trader1\"", META)).isEqualTo(LogonOutcome.MALFORMED);
+    void blankUsernameIsAPrincipalMismatchAndNeverReachesTheEndpoint() {
+        var client = new UserInfoAuthenticatorTest.FakeClient(200, "{\"sub\":\"" + USER + "\",\"csgroups\":[\"amps-users\"]}");
+        LogonService service = service(client);
 
-        verifyNoInteractions(validator);
-        assertThat(attempts(LogonOutcome.MALFORMED)).isEqualTo(2);
+        assertThat(service.logon("  ", TOKEN, null)).isEqualTo(LogonOutcome.PRINCIPAL_MISMATCH);
+        assertThat(service.logon(null, TOKEN, null)).isEqualTo(LogonOutcome.PRINCIPAL_MISMATCH);
+        assertThat(client.tokens).isEmpty();
     }
 
     @Test
-    void invalidBase64OrMissingColonIsMalformed() {
-        assertThat(service.logon(Optional.of("trader1"), "Basic ***", META)).isEqualTo(LogonOutcome.MALFORMED);
-        assertThat(service.logon(Optional.of("trader1"), basic("trader1"), META)).isEqualTo(LogonOutcome.MALFORMED);
+    void everyOutcomeIsCountedAndTimedUnderItsOwnTag() {
+        assertThat(service(new UserInfoAuthenticatorTest.FakeClient(200, "{\"sub\":\"" + USER + "\",\"csgroups\":[\"amps-users\"]}"))
+                .logon(USER, TOKEN, null)).isEqualTo(LogonOutcome.SUCCESS);
+        assertThat(service(new UserInfoAuthenticatorTest.FakeClient(401, "{}"))
+                .logon(USER, TOKEN, null)).isEqualTo(LogonOutcome.INVALID_TOKEN);
+        assertThat(service(new UserInfoAuthenticatorTest.FakeClient(200, "{\"sub\":\"U999999\",\"csgroups\":[\"amps-users\"]}"))
+                .logon(USER, TOKEN, null)).isEqualTo(LogonOutcome.PRINCIPAL_MISMATCH);
+        assertThat(service(new UserInfoAuthenticatorTest.FakeClient(200, "{\"sub\":\"" + USER + "\",\"csgroups\":[\"other\"]}"))
+                .logon(USER, TOKEN, null)).isEqualTo(LogonOutcome.NOT_ENTITLED);
+        var down = new UserInfoAuthenticatorTest.FakeClient(200, "{}");
+        down.ioFailure = new IOException("refused");
+        assertThat(service(down).logon(USER, TOKEN, null)).isEqualTo(LogonOutcome.BACKEND_UNAVAILABLE);
 
-        verifyNoInteractions(validator);
+        for (LogonOutcome outcome : List.of(LogonOutcome.SUCCESS, LogonOutcome.INVALID_TOKEN,
+                LogonOutcome.PRINCIPAL_MISMATCH, LogonOutcome.NOT_ENTITLED, LogonOutcome.BACKEND_UNAVAILABLE)) {
+            assertThat(count(outcome)).as("attempts %s", outcome).isEqualTo(1.0);
+            assertThat(timed(outcome)).as("duration %s", outcome).isEqualTo(1L);
+        }
+        assertThat(count(LogonOutcome.NO_TOKEN)).isZero();
     }
 
     @Test
-    void emptyUsernameOrPasswordIsMalformedBeforeAnyBackendCall() {
-        assertThat(service.logon(Optional.of("trader1"), basic("trader1:"), META)).isEqualTo(LogonOutcome.MALFORMED);
-        assertThat(service.logon(Optional.empty(), basic(":secret"), META)).isEqualTo(LogonOutcome.MALFORMED);
+    void metersExistForEveryOutcomeBeforeTheFirstAttempt() {
+        service(new UserInfoAuthenticatorTest.FakeClient(200, "{}"));
 
-        verifyNoInteractions(validator);
-        assertThat(attempts(LogonOutcome.MALFORMED)).isEqualTo(2);
-    }
-
-    @Test
-    void pathUsernameMismatchIsRejectedBeforeAnyBackendCall() {
-        assertThat(service.logon(Optional.of("other"), basic("trader1:secret"), META))
-                .isEqualTo(LogonOutcome.USERNAME_MISMATCH);
-
-        verifyNoInteractions(validator);
-        assertThat(attempts(LogonOutcome.USERNAME_MISMATCH)).isEqualTo(1);
-    }
-
-    @Test
-    void pathUsernameComparisonIsCaseInsensitive() {
-        when(validator.validate("trader1", "secret")).thenReturn(ValidationResult.VALID);
-
-        assertThat(service.logon(Optional.of("TRADER1"), basic("trader1:secret"), META)).isEqualTo(LogonOutcome.SUCCESS);
-    }
-
-    @Test
-    void pathUsernameCheckCanBeDisabled() {
-        service = new LogonService(new BasicAuthorizationParser(), validator, properties(false), registry);
-        when(validator.validate("trader1", "secret")).thenReturn(ValidationResult.VALID);
-
-        assertThat(service.logon(Optional.of("other"), basic("trader1:secret"), META)).isEqualTo(LogonOutcome.SUCCESS);
-    }
-
-    @Test
-    void noPathUsernameSkipsTheCrossCheck() {
-        when(validator.validate("trader1", "secret")).thenReturn(ValidationResult.VALID);
-
-        assertThat(service.logon(Optional.empty(), basic("trader1:secret"), META)).isEqualTo(LogonOutcome.SUCCESS);
-        assertThat(service.logon(null, basic("trader1:secret"), META)).isEqualTo(LogonOutcome.SUCCESS);
-    }
-
-    @Test
-    void invalidCredentialsAreInvalid() {
-        when(validator.validate("trader1", "wrong")).thenReturn(ValidationResult.INVALID);
-
-        assertThat(service.logon(Optional.of("trader1"), basic("trader1:wrong"), META)).isEqualTo(LogonOutcome.INVALID);
-        assertThat(attempts(LogonOutcome.INVALID)).isEqualTo(1);
-        assertThat(timed(LogonOutcome.INVALID)).isEqualTo(1);
-    }
-
-    @Test
-    void validCredentialsAreSuccess() {
-        when(validator.validate("trader1", "se:cr:et")).thenReturn(ValidationResult.VALID);
-
-        assertThat(service.logon(Optional.of("trader1"), basic("trader1:se:cr:et"), META)).isEqualTo(LogonOutcome.SUCCESS);
-
-        verify(validator).validate("trader1", "se:cr:et");
-        assertThat(attempts(LogonOutcome.SUCCESS)).isEqualTo(1);
-        assertThat(attempts(LogonOutcome.INVALID)).isZero();
-    }
-
-    @Test
-    void backendUnavailableIsPropagated() {
-        when(validator.validate("trader1", "secret")).thenReturn(ValidationResult.BACKEND_UNAVAILABLE);
-
-        assertThat(service.logon(Optional.of("trader1"), basic("trader1:secret"), META))
-                .isEqualTo(LogonOutcome.BACKEND_UNAVAILABLE);
-        assertThat(attempts(LogonOutcome.BACKEND_UNAVAILABLE)).isEqualTo(1);
-    }
-
-    @Test
-    void backendExceptionIsBackendUnavailable() {
-        when(validator.validate(anyString(), anyString())).thenThrow(new IllegalStateException("ldap exploded"));
-
-        assertThat(service.logon(Optional.of("trader1"), basic("trader1:secret"), META))
-                .isEqualTo(LogonOutcome.BACKEND_UNAVAILABLE);
-        assertThat(attempts(LogonOutcome.BACKEND_UNAVAILABLE)).isEqualTo(1);
-    }
-
-    @Test
-    void backendReturningNullIsBackendUnavailable() {
-        when(validator.validate("trader1", "secret")).thenReturn(null);
-
-        assertThat(service.logon(Optional.of("trader1"), basic("trader1:secret"), META))
-                .isEqualTo(LogonOutcome.BACKEND_UNAVAILABLE);
-    }
-
-    @Test
-    void nullMetadataIsTolerated() {
-        when(validator.validate("trader1", "secret")).thenReturn(ValidationResult.VALID);
-
-        assertThat(service.logon(Optional.of("trader1"), basic("trader1:secret"), null)).isEqualTo(LogonOutcome.SUCCESS);
-    }
-
-    @Test
-    void metersAreRegisteredForEveryOutcomeAndTaggedOnlyWithOutcome() {
         for (LogonOutcome outcome : LogonOutcome.values()) {
-            assertThat(attempts(outcome)).isZero();
+            assertThat(count(outcome)).isZero();
             assertThat(timed(outcome)).isZero();
         }
-        List<Meter> meters = registry.getMeters();
-        assertThat(meters).isNotEmpty();
-        for (Meter meter : meters) {
-            assertThat(meter.getId().getTags()).extracting(Tag::getKey).containsOnly(LogonService.OUTCOME_TAG);
-        }
+    }
+
+    @Test
+    void anAuthenticatorThatThrowsIsBackendUnavailable(CapturedOutput output) {
+        var client = new UserInfoAuthenticatorTest.FakeClient(200, "{}");
+        UserInfoAuthenticator exploding = new UserInfoAuthenticator(config("amps-users"), client) {
+            @Override
+            LogonOutcome authenticate(String username, String accessToken) {
+                throw new IllegalStateException("exploded for a reason unrelated to the token");
+            }
+        };
+        LogonService service = new LogonService(exploding, meterRegistry);
+
+        assertThat(service.logon(USER, TOKEN, null)).isEqualTo(LogonOutcome.BACKEND_UNAVAILABLE);
+        assertThat(count(LogonOutcome.BACKEND_UNAVAILABLE)).isEqualTo(1.0);
+        assertThat(output.getAll()).contains("ERROR").contains("exploded for a reason").doesNotContain(TOKEN);
+    }
+
+    @Test
+    void oneInfoLinePerAttemptWithSanitisedMetadata(CapturedOutput output) {
+        var client = new UserInfoAuthenticatorTest.FakeClient(200, "{\"sub\":\"" + USER + "\",\"csgroups\":[\"amps-users\"]}");
+        LogonService service = service(client);
+
+        service.logon(USER, TOKEN, new RequestMetadata("MacroDesktop-jdoe", "10.1.2.3", "json-tcp-17"));
+        service.logon("evil outcome=SUCCESS", TOKEN, new RequestMetadata("forged outcome=SUCCESS", null, null));
+        service.logon(USER, null, null);
+
+        String all = output.getAll();
+        assertThat(all).contains("logon user=" + USER + " outcome=SUCCESS client=MacroDesktop-jdoe remote=10.1.2.3 conn=json-tcp-17 ms=");
+        assertThat(all).contains("logon user=evil_outcome_SUCCESS outcome=PRINCIPAL_MISMATCH client=forged_outcome_SUCCESS remote=- conn=- ms=");
+        assertThat(all).contains("logon user=" + USER + " outcome=NO_TOKEN client=- remote=- conn=- ms=");
+        assertThat(all).doesNotContain(TOKEN);
+        assertThat(all.lines().filter(line -> line.contains("logon user=")).count()).isEqualTo(3);
     }
 }

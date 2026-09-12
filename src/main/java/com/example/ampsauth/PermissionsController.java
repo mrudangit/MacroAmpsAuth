@@ -1,6 +1,6 @@
 package com.example.ampsauth;
 
-import java.util.Optional;
+import jakarta.servlet.http.HttpServletRequest;
 
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -12,8 +12,19 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * The AMPS-facing endpoints. No logic beyond: read headers and path -> {@link LogonService} -> map
- * the outcome to status, body and headers. Error responses have empty bodies.
+ * The AMPS-facing endpoint. AMPS calls {@code GET /amps/v1/permissions/{username}} with the logon
+ * username substituted into the path ({@code {{USER_NAME}}}) and the logon password (an access
+ * token) in the header named by {@code amps.auth.password-header}
+ * ({@code <HTTPHeader>X-AMPS-Password: {{AMPS_PASSWORD}}</HTTPHeader>} on the AMPS side).
+ * No logic beyond: read path and headers -> {@link LogonService} -> map the outcome to a status.
+ * Error responses have empty bodies.
+ * <p>
+ * A request without the token header gets {@code 401} plus a Basic challenge rather than {@code 403}:
+ * the AMPS module discovers the HTTP authentication scheme by first sending a credential-less
+ * request and retrying after a {@code 401}, and the AMPS documentation does not say whether the
+ * configured {@code HTTPHeader} values are already present on that first request. The challenge
+ * makes the module retry with its credentials and headers either way; the Basic credentials
+ * themselves are ignored, only the header counts.
  */
 @RestController
 class PermissionsController {
@@ -26,44 +37,32 @@ class PermissionsController {
 
     private final LogonService logonService;
     private final PermissionsDocument permissionsDocument;
+    private final String passwordHeader;
 
-    public PermissionsController(LogonService logonService, PermissionsDocument permissionsDocument) {
+    PermissionsController(LogonService logonService, PermissionsDocument permissionsDocument, AmpsProperties properties) {
         this.logonService = logonService;
         this.permissionsDocument = permissionsDocument;
+        this.passwordHeader = properties.auth().passwordHeader();
     }
 
-    /** ResourceURI with {@code {{USER_NAME}}}: the path variable is cross-checked against the Basic username. */
     @GetMapping(PATH + "/{username}")
     public ResponseEntity<byte[]> permissions(
             @PathVariable("username") String username,
-            @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
+            HttpServletRequest request,
             @RequestHeader(value = CLIENT_NAME_HEADER, required = false) String clientName,
             @RequestHeader(value = REMOTE_ADDRESS_HEADER, required = false) String remoteAddress,
             @RequestHeader(value = CONNECTION_NAME_HEADER, required = false) String connectionName) {
-        return respond(logonService.logon(Optional.of(username), authorization,
-                new RequestMetadata(clientName, remoteAddress, connectionName)));
-    }
-
-    /** ResourceURI without {@code {{USER_NAME}}}: identity comes from the Basic username alone. */
-    @GetMapping(PATH)
-    public ResponseEntity<byte[]> permissions(
-            @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
-            @RequestHeader(value = CLIENT_NAME_HEADER, required = false) String clientName,
-            @RequestHeader(value = REMOTE_ADDRESS_HEADER, required = false) String remoteAddress,
-            @RequestHeader(value = CONNECTION_NAME_HEADER, required = false) String connectionName) {
-        return respond(logonService.logon(Optional.empty(), authorization,
-                new RequestMetadata(clientName, remoteAddress, connectionName)));
-    }
-
-    private ResponseEntity<byte[]> respond(LogonOutcome outcome) {
+        LogonOutcome outcome = logonService.logon(username, request.getHeader(passwordHeader),
+                new RequestMetadata(clientName, remoteAddress, connectionName));
         return switch (outcome) {
             case SUCCESS -> ResponseEntity.ok()
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(permissionsDocument.bytes());
-            case NO_CREDENTIALS -> ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+            case NO_TOKEN -> ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .header(HttpHeaders.WWW_AUTHENTICATE, BASIC_CHALLENGE)
                     .build();
-            case MALFORMED, USERNAME_MISMATCH, INVALID -> ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+            case INVALID_TOKEN, PRINCIPAL_MISMATCH, NOT_ENTITLED ->
+                    ResponseEntity.status(HttpStatus.FORBIDDEN).build();
             case BACKEND_UNAVAILABLE -> ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build();
         };
     }
